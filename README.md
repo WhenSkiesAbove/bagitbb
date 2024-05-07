@@ -1,7 +1,7 @@
 # bagitBB - bagit, but better!
 
 ***Disclaimer***: I'm new to Github and programming; please be patient with me.  
-***Disclaimer the second***: "Better" is neither a dig at bagit nor implication that this is a different, somehow better bagging standard. Just a name I found amusing.
+***Disclaimer the second***: "Better" is neither a dig at bagit-python nor implication that this is a different, somehow better bagging standard. Just a name I found amusing that also references its expanded functionality.
 
 ### Version 1.0
 
@@ -36,7 +36,7 @@ Made and tested on Python version 3.10.6 (Linux) and 3.11.9 (Windows)
 
 ***Updates*** bags with new metadata and regenerates checksum manifests as per bagit-python.  
 
-***Archivematica mode*** unbags to a target directory formatted for use with Artefactual's Archivematica software. Includes /objects and /metadata subfolder with payload copied to /objects and bag metadata copied to /submissionDocumentation folder within /metadata.  
+***Archivematica mode*** unbags to a target directory formatted for use with Artefactual's [Archivematica](https://www.archivematica.org/en/) software. Includes /objects and /metadata subfolder with payload copied to /objects and bag metadata copied to /submissionDocumentation folder within /metadata.  
 
 
 ## Installation
