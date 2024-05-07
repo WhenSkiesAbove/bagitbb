@@ -81,7 +81,7 @@ Options:
   -a ALG, --algorithm=ALG
                         Algorithm used to generate checksums both for copied  
                         files and for bag. Choose either sha256 (default) or  
-                        md5. ex: -c md5
+                        md5.
 
   -i, --inplace         Bags or unbags files in place (ie does not copy files  
                         to target). Bag in place is default bagit.py  
