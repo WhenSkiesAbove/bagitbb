@@ -834,7 +834,7 @@ def setup_opts():
         type = 'string',
         dest = 'alg',
         default = 'sha256',
-        help = 'Algorithm used to generate checksums both for copied files and for bag. Choose either sha256 (default) or md5. ex: -c md5'
+        help = 'Algorithm used to generate checksums both for copied files and for bag. Choose either sha256 (default) or md5.'
     )
     parser.add_option(
         '-i',
