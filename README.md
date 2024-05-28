@@ -3,7 +3,7 @@
 ***Disclaimer***: I'm new to Github and programming; please be patient with me.  
 ***Disclaimer the second***: "Better" is neither a dig at bagit-python nor implication that this is a different, somehow better bagging standard. Just a name I found amusing that also references its expanded functionality.
 
-### Version 1.0
+### Version 1.1
 
 Simple python program that builds on the Library of Congress' [bagit-python library](https://github.com/LibraryOfCongress/bagit-python), allowing for bagging and unbagging to target directory instead of just bagging in place. Meant to be more lightweight than gui bagging programs like Library of Congress' [Bagger](https://github.com/LibraryOfCongress/bagger) and [AVPreserve's Exactly](https://www.weareavp.com/) (if that's even available anymore).
 
