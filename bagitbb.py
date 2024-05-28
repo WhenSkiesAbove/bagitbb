@@ -68,17 +68,18 @@ import json
 import time
 import platform
 import multiprocessing
-import re
 import sys
 sys.setrecursionlimit(10**6) #shutil was crashing due to the default recursion cap
 
-VERSION = '1.0'
+VERSION = '1.1'
 ARCHIVEMATICA_URL = 'https://www.archivematica.org/en/docs/'
 ARCHIVEMATICA_VERSION = '1.14.1'
 
 #time formats
 TIME_FMT_UNBAG = '%B' + ' ' + '%d' + ', ' + '%Y' + ' ' + '%H' + ':' + '%M' + ':' + '%S' + ' ' + '%z' #for unbag.txt
 TIME_FMT_METADIR = '_' + '%H' + 'h' + '%M' + 'm' + '%S' + 's' #for bag metadata folder (when unbagging)
+
+SUB_DOC_KEY = 'submission documentation' #JSON key for submission docs
 
 STATUS_MSG = { #general progress messages
     'analyze': 'analyzing files',
@@ -377,7 +378,7 @@ class BetterBag():
         except Exception as e:
             throw_error(e, Exception, quiet=self.quiet)
         get_status(STATUS_MSG['update'], self.quiet, fin_text=STATUS_MSG['done'])
-            
+         
 
 #for all them checksum manifests (NOT fast comparisons)
 class Manifest():
@@ -500,28 +501,96 @@ class Manifest():
                 line = x[1] + ' ' + x[0] + '\n'
                 new_manifest.write(line)
 
-                
+
+#creation of metadata and submission docs for bags
+class BagMetadata():
+
+    def __init__(self, manual_fields={}, json=None, manifest_update=False, quiet=True):
+    
+        self.manual_fields = manual_fields
+        self.json = json
+        self.manifest_update = manifest_update
+        self.quiet = quiet
+        self.metadata = {}
+        self.doc_list = []
+        
+    #setup metadata content for bag-info.txt
+    def set_bag_metadata(self):
+
+        if self.json != None:
+            self.read_json()
+            if SUB_DOC_KEY in self.metadata:
+                self.get_sub_docs()
+                self.fmt_sub_doc_text()
+            self.parse_bag_metadata()
+        
+        elif len(self.manual_fields) != 0:
+            self.metadata = self.manual_fields
+            self.parse_bag_metadata()
+
+    #list of submission documents to copy with bag
+    def get_sub_docs(self):
+
+        for key in self.metadata[SUB_DOC_KEY]:
+            self.doc_list.append(self.metadata[SUB_DOC_KEY][key])
+    
+    #reformat submission docs listed in json file for display in bag-info.txt
+    def fmt_sub_doc_text(self):  
+
+        text = ''
+
+        for x in self.metadata[SUB_DOC_KEY]:
+            filename = str(os.path.basename(self.metadata[SUB_DOC_KEY][x]))
+            text += x + ' (' + filename + ')'
+            text += ', '
+        text = text[:-2]
+
+        self.metadata[SUB_DOC_KEY] = text
+
+    #parse JSON file for bag-info.txt metadata
+    def read_json(self):
+
+        try:
+            with open(self.json, 'r') as json_file:
+                self.metadata = json.loads(json_file.read())
+        except FileNotFoundError as e:
+            throw_error(e, FileNotFoundError, quiet=self.quiet)
+        except json.JSONDecodeError as e:
+            throw_error('JSON error: ' + str(e), JSONError, quiet=self.quiet)
+        except Exception as e:
+            throw_error(e, Exception, quiet=self.quiet)
+            
+    #remove metadata fields for bag-info.txt that user did not enter information for
+    def parse_bag_metadata(self, manifest_update=False):
+
+        metadata_list = list(self.metadata)
+        for x in range(len(self.metadata)):
+            if self.metadata[metadata_list[x]] == None or self.metadata[metadata_list[x]] == '':
+                del self.metadata[metadata_list[x]]
+
+        #to document when the info in baginfo.txt and/or manifest was last updated
+        if len(self.metadata) != 0:
+            self.metadata['Bag info last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
+        if manifest_update:
+            self.metadata['Manifest last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
+
+
 #Custom exceptions - probably don't need all of these, but I'm still learning                
 
 class ManifestError(Exception):
-    pass
-    
+    pass  
 
 class OptError(Exception):
     pass
-    
 
 class ValidationError(Exception):
     pass
-
     
 class CopyError(Exception):
     pass
-
     
 class MultiprocessingError(Exception):
     pass
-    
 
 class JSONError(Exception):
     pass
@@ -532,6 +601,12 @@ class JSONError(Exception):
 
 #create bag
 def bag_files(indirs, outdir, alg, inplace=False, metadata={}, processes=1, quiet=True, fast=False, compression=0, bagit_output=False, sub_docs=[]):
+    
+    #confirm submission docs exist
+    if len(sub_docs) != 0:
+        for x in sub_docs:
+            if not os.path.isfile(x):
+                throw_error('Submission document not found: ' + str(x), FileNotFoundError, quiet=quiet)
     
     #mandatory custom metadata for bag-info.txt
     metadata['Bag-Software-Agent'] = 'bagit.py ' + bagit.VERSION + ' ' + bagit.PROJECT_URL + ' (via bagitbb.py v.' + VERSION + ')'
@@ -620,63 +695,6 @@ def bag_files(indirs, outdir, alg, inplace=False, metadata={}, processes=1, quie
     return better_bag
 
 
-#create list of sub_docs for bag_files function
-def get_sub_docs(docs_from_file, docs_from_list, quiet):
-
-    sub_docs = []
-    
-    try:
-        if docs_from_file != None:
-            sub_docs += get_sub_docs_from_file(docs_from_file)
-        if docs_from_list != None:
-            sub_docs = get_sub_docs_from_text(docs_from_list)
-    except FileNotFoundError as e:
-        throw_error(e, FileNotFoundError, quiet=quiet)
-    except Exception as e:
-        throw_error(e, quiet=quiet)
-    
-    return sub_docs
-
-
-#list of submission docs you want algonside bag metadata
-#using user created list [path/to/file.txt,path/to/other.jpg]
-def get_sub_docs_from_text(doc_string):
-
-    delim = ','
-    
-    doc_string = doc_string[1:]
-    doc_string = doc_string[:len(doc_string)-1]
-    if delim in doc_string:    
-        sub_docs = doc_string.split(delim)
-    else:
-        sub_docs = [doc_string]
-    
-    for i in range(len(sub_docs)):
-        if not os.path.isfile(sub_docs[i]):
-            raise FileNotFoundError('Submission document not found: ' + sub_docs[i])
-        sub_docs[i] = os.path.abspath(sub_docs[i])
-    
-    return sub_docs
-
-
-#list of submission docs you want algonside bag metadata
-#using user supplied file list (text doc, 1 file per line)
-def get_sub_docs_from_file(doc_path):
-
-    doc_path = os.path.abspath(doc_path)
-    sub_docs = []
-    
-    with open(doc_path, 'r') as doc_file:
-        for line in doc_file:
-            line = line.strip('\n')
-            
-            if not os.path.isfile(line):
-                raise FileNotFoundError('Submission document not found: ' + line)
-            sub_docs.append(line)
-    
-    return sub_docs
-
-
 #validate bags and copies using only file size and quantity (as per bagit.py option)
 def fast_compare(indir, outdir, exclude=[], quiet=True):
     
@@ -739,6 +757,7 @@ def copy_files(src, dest, copy_type, quiet=True):
     except Exception as e:
         throw_error(e, Exception, quiet=quiet)
 
+
 def confirm_task(question_text, cancel_text):
     
     '''NOTE: this prompt will not trigger in quiet mode.
@@ -755,56 +774,6 @@ def confirm_task(question_text, cancel_text):
             print('invalid selection')
             
 
-'''*** metadata functions ***'''
-
-#setup metadata content for baginfo.txt
-def set_bag_metadata(json=None, manual_fields={}, manifest_update=False, quiet=True):
-    
-    if json != None:
-        metadata = read_json(json, quiet=quiet)
-        metadata = parse_bag_metadata(metadata, manifest_update=manifest_update)
-    elif len(manual_fields) != 0:
-        metadata = manual_fields
-        metadata = parse_bag_metadata(metadata, manifest_update=manifest_update)
-    else:
-        metadata = {}
-    
-    return metadata
-
-
-#parse JSON file for baginfo metadata
-def read_json(path, quiet=True):
-
-    try:
-        with open(path, 'r') as json_file:
-            metadata = json.loads(json_file.read())
-    except FileNotFoundError as e:
-        throw_error(e, FileNotFoundError, quiet=quiet)
-    except json.JSONDecodeError as e:
-        throw_error('JSON error: ' + str(e), JSONError, quiet=quiet)
-    except Exception as e:
-        throw_error(e, Exception, quiet=quiet)
-    
-    return metadata
-    
-    
-#remove metadata fields for baginfo.txt that user did not enter information for
-def parse_bag_metadata(metadata, manifest_update=False):
-
-    metadata_list = list(metadata)
-    for x in range(len(metadata)):
-        if metadata[metadata_list[x]] == None or metadata[metadata_list[x]] == '':
-            del metadata[metadata_list[x]]
-    
-    #to document when the info in baginfo.txt and/or manifest was last updated
-    if len(metadata) != 0:
-        metadata['Bag info last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
-    if manifest_update:
-        metadata['Manifest last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
-    
-    return metadata
-
-
 
 '''*** arg and opt functions ***'''
 
@@ -816,13 +785,18 @@ def setup_opts():
     usage = logo + '\n\n'
     usage += 'Copyright 2023 Jarad Buckwold - free to use or alter as needed; credit is appreciated, but not required.\n\n'
     usage += 'v' + VERSION + ' (bagit.py v' + bagit.VERSION + ')\n\n'
-    usage += '%prog [options] [mode] [input dir1] [input dir2] [...] [output dir]\n\nBags files using Library of Congress\' Bagit python module, but can bag files to a target directory\ninstead of just bagging them in place. Can similarly unbag to target directory. In both cases,\nchecksums are generated prior to copying files and then compared to those generated from the copied\nfiles in the target folder, ensuring file integrity.\n\n'
+    usage += '%prog [options] [mode] [input dir1] [input dir2] [...] [output dir]\n\nBags files using Library of Congress\' Bagit python module, but can bag files to a target directory\ninstead of just bagging them in place. Can similarly unbag to target directory. In both cases,\nchecksums are generated prior to copying files and then compared to those generated from the copied\nfiles in the target folder, ensuring file integrity.\n\n\n'
     usage += 'MODES:\n\n'
     usage += 'bag\n\n    Bags one or more folders or files to target folder.\n    ex: %prog --accession-number A2020-335 bag /home/folder1 /home/file1.file /home/bags/bag1\n\n'
     usage += 'unbag\n\n    Unbags preexisting bag and bag metadata to target folder.\n    ex: %prog unbag /home/bags/bag1 /home/unbagged_files\n\n'
     usage += 'validate\n\n    Validates integrity of existing bag.\n    ex: %prog validate /home/bags/bag1\n\n'
     usage += 'update\n\n    Updates metadata in bag-info.txt (fields with same names will be overwriten). Regenerates manifests if regen option is used.\n    ex: %prog -j /path/to/json.json update /path/to/bag1\n\n'
-    usage += 'NOTE: for bash shell (not sure about others), wildcard * character can be used for bagging to target (NOT for anything else) only if there are NO loose files in the base directory.\n'
+    usage += 'Note: for bash shell (not sure about others), wildcard * character can be used for bagging to target (NOT for anything else) only if there are NO loose files in the base directory.\n\n\n'
+    usage += 'SUBMISSION DOCUMENTS\n\n'
+    usage += 'Use ' + SUB_DOC_KEY + ' heading in json metadata to identify documents to copy alongside bagit.txt and bag-info.txt (ie outside the /data folder).\n'
+    usage += 'ex:\n'
+    usage += '"' + SUB_DOC_KEY + '": {\n    "accession form": "/path/to/accession.pdf",\n    "format report": "/path/to/report.txt"\n}'
+    
     
     parser = OptionParser(usage=usage)
 
@@ -834,7 +808,7 @@ def setup_opts():
         type = 'string',
         dest = 'alg',
         default = 'sha256',
-        help = 'Algorithm used to generate checksums both for copied files and for bag. Choose either sha256 (default) or md5.'
+        help = 'Algorithm used to generate checksums both for copied files and for bag. Choose either sha256 (default) or md5. ex: -c md5'
     )
     parser.add_option(
         '-i',
@@ -856,7 +830,7 @@ def setup_opts():
         action = 'store',
         type = 'string',
         dest = 'json',
-        help = 'Import bag metadata for bag-info.txt from json file instead of using options. Metadata from options will be ignored. ex: -j /path/to/metadata.json'
+        help = 'Import bag metadata for bag-info.txt from json file instead of using options. Metadata from options will be ignored. Can also be used to identify submission documents to bag algonside bagit.txt and bag-info.txt (see usage instructions above). ex: -j /path/to/metadata.json'
     )
     parser.add_option(
         '-q',
@@ -919,22 +893,6 @@ def setup_opts():
         default = False,
         dest = 'bagit_output',
         help = 'Show output from bagit.py. Quiet mode supersedes this option.'
-    )
-    parser.add_option(
-        '--doc-list',
-        action = 'store',
-        type = 'string',
-        default = None,
-        dest = 'doc_list',
-        help = 'Include documentation alongside bag metadata files (ie outside of /data with bagit.txt). Enter file paths in square brackets separated a comma (no extra spaces): [/path/to/doc1.txt,path/2.txt]'
-    )
-    parser.add_option(
-        '--doc-file',
-        action = 'store',
-        type = 'string',
-        default = None,
-        dest = 'doc_file',
-        help = 'Same as --doc-list except an external file is used to identify submission docs. File should be unformatted text with the path to one submission document per line. Ex. --doc-file /path/to/files.txt'
     )
         
         
@@ -1251,20 +1209,21 @@ def Main():
     
     #bagging ------------ /
     if mode == 'bag':
-    
-        sub_docs = get_sub_docs(options.doc_file, options.doc_list, quiet=quiet)          
-        bag_metadata = set_bag_metadata(json=options.json, manual_fields=manual_fields, quiet=quiet)
+         
+        bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, manifest_update=options.update_manifest, quiet=quiet)
+        bag_metadata.set_bag_metadata()
+
         bag = bag_files(
             indirs,
             outdir,
             options.alg,
             inplace = options.inplace,
-            metadata = bag_metadata,
+            metadata = bag_metadata.metadata,
             processes = options.processes,
             quiet = quiet,
             fast = options.fast,
             bagit_output = bagit_output,
-            sub_docs = sub_docs
+            sub_docs = bag_metadata.doc_list
         )
     
     #unbagging ---------- /
@@ -1298,14 +1257,10 @@ def Main():
         if options.update_manifest and not quiet:
             confirm_task('WARNING: are you sure you want to overwrite current manifest? (y/n)', 'manifest regeneration cancelled')
         
-        bag_metadata = set_bag_metadata(
-            json = options.json,
-            manual_fields = manual_fields,
-            manifest_update = options.update_manifest,
-            quiet = quiet
-        )    
+        bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, manifest_update=options.update_manifest, quiet=quiet)
+        bag_metadata.set_bag_metadata()
         bag = BetterBag(indirs[0], processes=options.processes, quiet=quiet, bagit_output=bagit_output)
-        bag.update_metadata(bag_metadata, manifests=options.update_manifest)
+        bag.update_metadata(bag_metadata.metadata, manifests=options.update_manifest)
     
     dur = time.time() - start #duration of process
     
@@ -1318,3 +1273,5 @@ def Main():
                 
 if __name__ == '__main__':
     Main()
+    
+
