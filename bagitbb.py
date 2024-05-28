@@ -71,7 +71,7 @@ import multiprocessing
 import sys
 sys.setrecursionlimit(10**6) #shutil was crashing due to the default recursion cap
 
-VERSION = '1.1'
+VERSION = '1.0.0'
 ARCHIVEMATICA_URL = 'https://www.archivematica.org/en/docs/'
 ARCHIVEMATICA_VERSION = '1.14.1'
 
