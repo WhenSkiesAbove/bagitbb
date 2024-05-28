@@ -79,6 +79,15 @@ ARCHIVEMATICA_VERSION = '1.14.1'
 TIME_FMT_UNBAG = '%B' + ' ' + '%d' + ', ' + '%Y' + ' ' + '%H' + ':' + '%M' + ':' + '%S' + ' ' + '%z' #for unbag.txt
 TIME_FMT_METADIR = '_' + '%H' + 'h' + '%M' + 'm' + '%S' + 's' #for bag metadata folder (when unbagging)
 
+#auto-generated bag-info.txt metadata
+BAG_INFO_VERSION = 'Bag-Software-Agent' #from bagit.py
+BAG_INFO_DATE = 'Bagging-Date' #from bagit.py
+BAG_INFO_SIZE = 'Payload-Oxum' #from bagit.py
+BAG_INFO_VAL_TYPE = 'Fixity check type' #method of fixity validation
+BAG_INFO_CHECKSUM = 'checksum validation' #using checksum for fixity
+BAG_INFO_FAST = 'file number and size validation' #use size/quantity for fixity ("fast mode")
+BAG_INFO_UPDATE = 'Bag info last updated' #last time bag metadata was updated
+BAG_INFO REGEN = 'Bag manifests last updated' #last time bag manifests were updated
 SUB_DOC_KEY = 'submission documentation' #JSON key for submission docs
 
 STATUS_MSG = { #general progress messages
@@ -127,9 +136,12 @@ class BetterBag():
         self.bag = self.open_bag() #create bagit.py Bag object
         self.alg = self.bag.algorithms[0] #this prog only uses one algorithm unlike bagit.py
         
-        #turn on bagit output - overwritten by quiet mode
-        if bagit_output and not quiet: bagit.logging.basicConfig(level=bagit.logging.INFO)
-
+        #turn on or off bagit output
+        if bagit_output and not quiet:
+            bagit.logging.basicConfig(level=bagit.logging.INFO)
+        else:
+            bagit.logging.basicConfig(level=bagit.logging.ERROR)
+            
     #make sure bag can be opened w/o error
     def open_bag(self):
         
@@ -267,7 +279,7 @@ class BetterBag():
         return tmp_dir
         
     #copy bag metadata files when unbagging
-    def copy_bag_files(self, bag_metadata_path, tmp_dir, inplace = False):
+    def copy_bag_files(self, bag_metadata_path, tmp_dir, inplace=False):
         
         #copy over bag metadata and delete temp dir
         if inplace:
@@ -352,25 +364,34 @@ class BetterBag():
             'copies validated': time.strftime(TIME_FMT_UNBAG, times['copies_validated'])
         }
         if fast:
-            fields['fixity check type'] = 'file number and size validation'
+            fields[BAG_INFO_VAL_TYPE] = BAG_INFO_FAST
         else:
-            fields['fixity check type'] = 'checksum validation'
+            fields[BAG_INFO_VAL_TYPE] = BAG_INFO_CHECKSUM
         
         with open(os.path.join(file_path, filename), 'w') as unbag_file: 
             for key, value in fields.items():
                 unbag_file.write(key + ': ' + value + '\n')
         
     #update bag metadata in baginfo.txt
-    def update_metadata(self, metadata, manifests=False):
+    def update_metadata(self, metadata, manifests=False, fast=False):
         
         '''appends bag-info.txt; new fields will overwrite old fields with same name
         (note that empty JSON fields are not counted and will therefore not overwrite
         anything)'''
         
-        #update and save
+        #update fixity check type if regenerating
+        if manifests:
+            if fast:
+                metadata[BAG_INFO_VAL_TYPE] = BAG_INFO_FAST
+            else:
+                metadata[BAG_INFO_VAL_TYPE] = BAG_INFO_CHECKSUM
+                
+        #work out new metadata
         if not self.bagit_output: get_status(STATUS_MSG['update'], self.quiet)
         for key in metadata:
             self.bag.info[key] = metadata[key]
+        
+        #update and save
         try:
             self.bag.save(processes=self.processes, manifests=manifests)
         except (bagit.BagError, bagit.BagValidationError) as e:
@@ -532,7 +553,7 @@ class BagMetadata():
     def get_sub_docs(self):
 
         for key in self.metadata[SUB_DOC_KEY]:
-            self.doc_list.append(self.metadata[SUB_DOC_KEY][key])
+            self.doc_list.append(os.path.abspath(self.metadata[SUB_DOC_KEY][key]))
     
     #reformat submission docs listed in json file for display in bag-info.txt
     def fmt_sub_doc_text(self):  
@@ -561,7 +582,7 @@ class BagMetadata():
             throw_error(e, Exception, quiet=self.quiet)
             
     #remove metadata fields for bag-info.txt that user did not enter information for
-    def parse_bag_metadata(self, manifest_update=False):
+    def parse_bag_metadata(self):
 
         metadata_list = list(self.metadata)
         for x in range(len(self.metadata)):
@@ -571,8 +592,8 @@ class BagMetadata():
         #to document when the info in baginfo.txt and/or manifest was last updated
         if len(self.metadata) != 0:
             self.metadata['Bag info last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
-        if manifest_update:
-            self.metadata['Manifest last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
+        if self.manifest_update:
+            self.metadata['Bag manifests last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
 
 
 #Custom exceptions - probably don't need all of these, but I'm still learning                
@@ -609,8 +630,8 @@ def bag_files(indirs, outdir, alg, inplace=False, metadata={}, processes=1, quie
                 throw_error('Submission document not found: ' + str(x), FileNotFoundError, quiet=quiet)
     
     #mandatory custom metadata for bag-info.txt
-    metadata['Bag-Software-Agent'] = 'bagit.py ' + bagit.VERSION + ' ' + bagit.PROJECT_URL + ' (via bagitbb.py v.' + VERSION + ')'
-    metadata['Fixity check type'] = 'file number and size validation' if fast else 'checksum validation'
+    metadata[BAG_INFO_VERSION] = 'bagit.py ' + bagit.VERSION + ' ' + bagit.PROJECT_URL + ' (via bagitbb.py v.' + VERSION + ')'
+    metadata[BAG_INFO_VAL_TYPE] = BAG_INFO_FAST if fast else BAG_INFO_CHECKSUM
     
     #turn on bagit output
     if bagit_output and not quiet: bagit.logging.basicConfig(level=bagit.logging.INFO)
@@ -1001,7 +1022,7 @@ def check_paths(indirs, outdir, mode):
 
 
 #misc option errors
-def validate_opts(alg, inplace, indir, doc_file, doc_list):
+def validate_opts(alg, inplace, indir):
 
     #make sure chosen alg is legit
     if alg != 'sha256' and alg != 'md5':
@@ -1013,17 +1034,6 @@ def validate_opts(alg, inplace, indir, doc_file, doc_list):
         this_file_name = os.path.basename(this_file_path)
         if os.path.isfile(os.path.join(indir, this_file_name)):
             raise OptError('Cannot bag/unbag in-place directory containing ' + this_file_name)
-
-
-    if doc_file != None:
-        if not os.path.isfile(doc_file):
-            raise FileNotFoundError('Submission documentation file not found.')
-    
-    if doc_list != None:
-        start_char = '['
-        end_char = ']'
-        if not doc_list.startswith(start_char) or not doc_list.endswith(end_char):
-            raise OptError('Invalid formatting for submission documentation list.')
     
 
 
@@ -1170,7 +1180,7 @@ def Main():
         parsed_args = parse_args(args, options.inplace, mode)
         indirs, outdir = get_paths(parsed_args)
         check_paths(indirs, outdir, mode)
-        validate_opts(options.alg, options.inplace, indirs[0], options.doc_file, options.doc_list)
+        validate_opts(options.alg, options.inplace, indirs[0])
     
     except OptError as e:
         throw_error(e, OptError, quiet=quiet)
@@ -1210,7 +1220,7 @@ def Main():
     #bagging ------------ /
     if mode == 'bag':
          
-        bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, manifest_update=options.update_manifest, quiet=quiet)
+        bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, quiet=quiet)
         bag_metadata.set_bag_metadata()
 
         bag = bag_files(
@@ -1260,7 +1270,7 @@ def Main():
         bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, manifest_update=options.update_manifest, quiet=quiet)
         bag_metadata.set_bag_metadata()
         bag = BetterBag(indirs[0], processes=options.processes, quiet=quiet, bagit_output=bagit_output)
-        bag.update_metadata(bag_metadata.metadata, manifests=options.update_manifest)
+        bag.update_metadata(bag_metadata.metadata, manifests=options.update_manifest, fast=options.fast)
     
     dur = time.time() - start #duration of process
     
@@ -1273,5 +1283,3 @@ def Main():
                 
 if __name__ == '__main__':
     Main()
-    
-
