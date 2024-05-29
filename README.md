@@ -24,8 +24,8 @@ Made and tested on Python version 3.10.6 (Linux) and 3.11.9 (Windows)
 2) Extract checksums from bag manifest to a list of (path, checksum) tuples
 3) Copy bag payload in /data to target directory
 4) Geneate new checksum manifest for unbagged files in target directory using hashlib
-5) Compare checksum manifest values to confirm integrity of copied files
-6)Copy bag metadata (bagit.txt, bag-info.txt, manifests, etc.) to newly created sub-directory in target
+5) Compare checksum manifest values to confirm integrity of copied files  
+6) Copy bag metadata (bagit.txt, bag-info.txt, manifests, etc.) to newly created sub-directory in target
 
 
 ## Other features
@@ -36,24 +36,25 @@ Made and tested on Python version 3.10.6 (Linux) and 3.11.9 (Windows)
 
 ***Updates*** bags with new metadata and regenerates checksum manifests as per bagit-python.  
 
-***Archivematica mode*** unbags to a target directory formatted for use with Artefactual's [Archivematica](https://www.archivematica.org/en/) software. Includes /objects and /metadata subfolder with payload copied to /objects and bag metadata copied to /submissionDocumentation folder within /metadata.  
+***Archivematica mode*** unbags to a target directory formatted for use with Artefactual's [Archivematica](https://www.archivematica.org/en/) software. Includes /objects and /metadata subfolders with payload copied to /objects and bag metadata copied to /metadata/submissionDocumentation folder.  
 
+***Submission documentation*** (accession records, donor forms, etc.) can be transferred alongside the payload, stored with bagit.txt (ie in the parent folder of /data). Documents can be identified in the JSON metadata file using "submission documentation" as the key:
+```
+"submission documentation": {  
+    "accession form": "/path/to/accessionform.doc",  
+    "donor form": "/path/to/donorform.doc"  
+}
+```
+These files will be copied with with the rest of the bag metadata files when unbagging.
 
 ## Installation
-Clone repository and access via python3 /path/to/bagitbb.py
+Clone repository or download python file and access via python3 /path/to/bagitbb.py.
 
 
 ## Usage
 
 ```    
 bagitbb.py [options] [mode] [input dir1] [input dir2] [...] [output dir]
-
-Bags files using Library of Congress' Bagit python module,  
-but can bag files to a target directory instead of just
-bagging them in place. Can similarly unbag to target directory.
-In both cases, checksums are generated prior to copying files
-and then compared to those generated from the copied files in
-the target folder, ensuring file integrity.
 
 MODES:
 bag  
@@ -105,8 +106,8 @@ Options:
 
   -p PROCESSES, --processes=PROCESSES
 
-                        Number of parallel processes used to create, validate,  
-                        or update bag. Original bagit.py option. Ex. -p 8
+                        Number of processes used to calculae checksums.  
+                        Original bagit.py option. Ex. -p 8
   
   -f, --fast            Only compare total size and number of files when  
                         validating bags and copied files. Original bagit.py  
@@ -123,16 +124,6 @@ Options:
 
   --bagit-output        Show output from bagit.py. Quiet mode supersedes this  
                         option.
-
-  --doc-list=DOC_LIST   Include documentation alongside bag metadata files (ie  
-                        outside of /data with bagit.txt). Enter file paths in  
-                        square brackets separated a comma (no extra spaces):  
-                        [/path/to/doc1.txt,path/2.txt]
-
-  --doc-file=DOC_FILE   Same as --doc-list except an external file is used to  
-                        identify submission docs. File should be unformatted  
-                        text with the path to one submission document per  
-                        line. Ex. --doc-file /path/to/files.txt
 
   metadata fields:
 
