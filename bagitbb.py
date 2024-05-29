@@ -87,7 +87,7 @@ BAG_INFO_VAL_TYPE = 'Fixity check type' #method of fixity validation
 BAG_INFO_CHECKSUM = 'checksum validation' #using checksum for fixity
 BAG_INFO_FAST = 'file number and size validation' #use size/quantity for fixity ("fast mode")
 BAG_INFO_UPDATE = 'Bag info last updated' #last time bag metadata was updated
-BAG_INFO REGEN = 'Bag manifests last updated' #last time bag manifests were updated
+BAG_INFO_REGEN = 'Bag manifests last updated' #last time bag manifests were updated
 SUB_DOC_KEY = 'submission documentation' #JSON key for submission docs
 
 STATUS_MSG = { #general progress messages
