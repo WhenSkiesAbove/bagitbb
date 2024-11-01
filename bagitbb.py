@@ -1,82 +1,24 @@
-'''
- _____________________________________________
-/     ____                 __    ____   ____  \
-|    / _  \ ____  ________/ /__ / _  \ / _  \ |
-|   /     //__  \/ _  /  /  __//     //     / |
-|  /  _  \/  _  /__  /  /  /_ /  _  \/  _  \  |
-| /______/\____/____/__/_____/______/______/  |
-|                                             |
-|              Bagit, but better              |     
-|            ©2024 Jarad Buckwold             |
-\_____________________________________________/
-
-This program expands on the Library of Congress' Bagit Python
-module by bagging files into target directories rather than just
-in place, and similarily unbagging bags into target directories.
-
-Meant to be more light-weight than LoC's Bagger and AVP's Exactly
-GUI apps.
-
-bagit.py is obviously required (made with v.1.8.1 in mind)
-    https://github.com/LibraryOfCongress/bagit-python
-Much of the code directly interacting with bagit came from the documentation on
-this page.
-
-
-Methodology for...
-
-Bagging to target:
-1) generate checksums for original files as a list of (path, checksum) tuples
-2) copy original files to target folder using shutil
-3) bag copies using bagit.py
-4) compare bag manifest to that generated in step 1
-
-Unbagging to target:
-1) validate bag using bagit.py
-2) convert bag manifest to list of (path, checksum) tuples
-3) copy files from data folder to target folder using shutil
-4) generate new checksum list of copied files and compare to manifest from step 3
-5) copy bag metadata (info files, manfiests) to target folder (in created subfolder)
-
-Unbagging can be done using Archivematica (version in constants section) folder structure,
-in which payload is unbagged to an 'objects' folder and the bag metadata is unbagged to
-a metadata folder along with a checksum manifest (see URL in constants section for details).
-
-It can also do the standard bagit.py validating, bagging in place, and updating bag metadata.
-
-Supports sha256 (default) and md5 checksums (though it wouldn't be hard to add other options).
-
-Supports custom bag-info.txt metadata fields: just add or subtract from metadata dict
-in main() and update corresponding optparse options in setup_opts(). Also
-supports using json file for metadata, the fields for which can be altered without
-changing any code.
-
-Feel free to use, alter, and import in your own code as you see fit. Credit would
-be nice, but not required. You can probably write a better program yourself, can't you?
-
-'''
-
-'''*** Imports and Constants ***'''
-
 import bagit
-import hashlib
-from optparse import OptionParser, OptionGroup
+import argparse
 from pathlib import Path
 import os
 import shutil
 import json
 import time
 import platform
+import logging
+import csv
 import multiprocessing
 import sys
-sys.setrecursionlimit(10**6) #shutil was crashing due to the default recursion cap
+from functools import partial
+sys.setrecursionlimit(10**6) # shutil was crashing due to the default recursion cap
 
-VERSION = '1.0.0'
+VERSION = '2.0.0'
 ARCHIVEMATICA_URL = 'https://www.archivematica.org/en/docs/'
-ARCHIVEMATICA_VERSION = '1.14.1'
+ARCHIVEMATICA_VERSION = '1.16.0'
 
 #time formats
-TIME_FMT_UNBAG = '%B' + ' ' + '%d' + ', ' + '%Y' + ' ' + '%H' + ':' + '%M' + ':' + '%S' + ' ' + '%z' #for unbag.txt
+TIME_FMT_LOG = '%B' + ' ' + '%d' + ', ' + '%Y' + ' ' + '%H' + ':' + '%M' + ':' + '%S' + ' ' + '%z' #for bag logs
 TIME_FMT_METADIR = '_' + '%H' + 'h' + '%M' + 'm' + '%S' + 's' #for bag metadata folder (when unbagging)
 
 #auto-generated bag-info.txt metadata
@@ -88,228 +30,239 @@ BAG_INFO_CHECKSUM = 'checksum validation' #using checksum for fixity
 BAG_INFO_FAST = 'file number and size validation' #use size/quantity for fixity ("fast mode")
 BAG_INFO_UPDATE = 'Bag info last updated' #last time bag metadata was updated
 BAG_INFO_REGEN = 'Bag manifests last updated' #last time bag manifests were updated
-SUB_DOC_KEY = 'submission documentation' #JSON key for submission docs
+SUB_DOC_KEY = 'submission documentation' #JSON key to identify submission docs
 
-STATUS_MSG = { #general progress messages
-    'analyze': 'analyzing files',
-    'copy': 'copying files',
-    'val_bag': 'validating bag',
-    'val_copies': 'validating copies',
-    'bag': 'bagging folder',
-    'open': 'opening bag',
-    'invalid': 'INVALID',
-    'done': 'done!',
-    'update': 'updating bag',
-    'error': 'ERROR'
+# order to choose alg in bags with multiple manifests
+ALG_RANK = ['sha256', 'sha512', 'md5']
+
+# log objects for each stage of process
+LOGGER = logging.getLogger('bagitbb')
+__doc__ = '''
+ _____________________________________________
+/     ____                 __    ____   ____  \\
+|    / _  \ ____  ________/ /__ / _  \ / _  \ |
+|   /     //__  \/ _  /  /  __//     //     / |
+|  /  _  \/  _  /__  /  /  /_ /  _  \/  _  \  |
+| /______/\____/____/__/_____/______/______/  |
+|                                             |
+|              Bagit, but better              |     
+|            ©2024 Jarad Buckwold             |
+\\_____________________________________________/
+
+v''' + VERSION + '''
+
+BagitBB expands on the Library of Congress' bagit-python module by bagging files into target
+directories rather than just in-place, and similarily unbagging bags into target directories.
+It can also do the standard bagit-python validating, bagging-in-place, and updating bag metadata.
+
+Meant to be more light-weight than LoC's Bagger and AVP's Exactly GUI apps.
+
+bagit-python is obviously required: https://github.com/LibraryOfCongress/bagit-python
+
+MODES
+------
+
+Bag:
+1) Generates checksums for original files (multiple sources can be used in one bag)
+2) Copies original files to target folder
+3) Bags copies using bagit-python
+4) Compares bag manifest to that generated in step 1
+Bag metadata can be added using either pre-set options or custom fields via a JSON file (see metadata section).
+
+    ex: %(prog)s --sha512 -j /path/to/metadata.json -m bag /path/to/folder1 /path/to/folder2 /path/to/target/folder
+
+Unbag:
+1) Validates bag using bagit-python
+2) Copies files from data folder to target folder
+3) Generates checksum manifest of copied files and compares to bag manifest
+4) Copies bag metadata (info files, manfiests) to target folder (in created subfolder)
+
+Unbagging can be done using Archivematica folder structure, in which the payload is unbagged to an "/objects"
+folder and the bag metadata is unbagged to a "/metadata" folder along with the checksum manifest.
+See ''' + ARCHIVEMATICA_URL + ''' for more details.
+
+    ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
+
+Validate:
+Validates bag using bagit-python.
+
+    ex: %(prog)s --mode validate /path/to/bag
+
+Update:
+Updates bag metadata and/or bag manifest using bagit-python. JSON or options can be used (see metadata section).
+
+    ex: %(prog)s -m update --regen --contact-name "Bob Bobberson" /path/to/bag
+
+IN-PLACE BAGGING/UNBAGGING
+---------------------------
+
+Files can be bagged-in-place (default bagit-python behavior) and bags can be unbagged-in-place. Bagging-in-place results
+in the original source being replaced by a bag (ie /path/to/folder becomes /path/to/bag). Unbagging-in-place validates
+the bag, moves the files from /data to the root folder, moves the bag metadata into its own folder, and then deletes
+the now empty /data folder.
+
+    ex: %(prog)s -m bag -i /path/to/folder
+    ex: %(prog)s -m unbag -i /path/to/bag
+
+METADATA
+---------
+
+Bag metadata can be added when creating or updating a bag, either manually (using pre-set options) or using custom fields
+in a JSON file:
+{
+    "field 1": "data1",
+    "field 2": "data2"
 }
+Blank fields in JSON file will be ignored.
 
-#FIXME is this technically a constant??
-TEXT_TYPE = { #text colours for logo display
-    #I don't know Windows or other OS colour equivolents, so everyone else gets bland default
-    'col1': '\033[92m' if os.name == 'posix' else '', #green
-    'col2': '\033[95m' if os.name == 'posix' else '', #purple
-    'none': '\033[0m' if os.name == 'posix' else '' #back to basics
+
+SUBMISSION DOCUMENTATION
+--------------------------
+
+Submission documentation (accession forms, file lists, etc.) can be copied alongside files when creating a bag. They are stored
+at the root level of the bag (ie alongside bagit.txt). To transfer submission docs, add an entry to a JSON file with key
+"''' + SUB_DOC_KEY + '''":
+
+"''' + SUB_DOC_KEY + '''": {
+    "DROID report": "path/to/droid.csv",
+	"Accession stuff": "path/to/accession.doc"
 }
+This can be added to the same JSON file used to add metadata.
 
-ERASE = '\033[K'
-
+'''
 
 
 '''*** Classes ***'''
 
-#class for manipulating bags (better bags, in fact!)
-class BetterBag():
+# Extension of bagit.Bag - representation of bag object
+class BetterBag(bagit.Bag):
 
-    '''Conceptually similar to bagit's Bag class (though more poorly coded).
-    The name isn't a dig to the bagit standard and does not mean this is a
-    different, somehow better standard than bagit; Just a name I found amusing
-    for this program. No shade.'''
-
-    def __init__(self, bag_path, processes=1, quiet=True, bagit_output=False):
-        
-        self.bag_path = bag_path
+    def __init__(self, path, quiet=True):
+    
+        super().__init__(path=path)
         self.quiet = quiet
-        self.processes = processes
-        self.data_path = os.path.join(bag_path, 'data')
-        self.bag_name = os.path.basename(bag_path)
-        self.bagit_output = bagit_output
-        self.bag = self.open_bag() #create bagit.py Bag object
-        self.alg = self.bag.algorithms[0] #this prog only uses one algorithm unlike bagit.py
-        
-        #turn on or off bagit output
-        if bagit_output and not quiet:
-            bagit.logging.basicConfig(level=bagit.logging.INFO)
-        else:
-            bagit.logging.basicConfig(level=bagit.logging.ERROR)
-            
-    #make sure bag can be opened w/o error
-    def open_bag(self):
-        
-        if not os.path.isdir(self.bag_path) and not self.bagit_output:
-            get_status(STATUS_MSG['val_bag'], self.quiet, fin_text=STATUS_MSG['error'])
-            throw_error('bag does not exist: ' + self.bag_path, FileNotFoundError, quiet=self.quiet)
-        
-        get_status(STATUS_MSG['open'], self.quiet)
-        
-        try:
-            bag = bagit.Bag(self.bag_path)
-                   
-        except (bagit.BagValidationError, bagit.BagError) as e:
-            get_status(STATUS_MSG['open'], self.quiet, fin_text=STATUS_MSG['error'])
-            throw_error(e, FileNotFoundError, quiet=self.quiet)
-                
-        except Exception as e:
-            throw_error(e, Exception, quiet=self.quiet)
-        
-        get_status(STATUS_MSG['open'], self.quiet, STATUS_MSG['done'])
-        
-        return bag
+        self.data_path = os.path.join(path, 'data')
+        self.bag_name = os.path.basename(path)
+        self.prime_alg = _prime_alg(self.algorithms)
     
-    #validate bag for completeness / checksums
-    def validate_bag(self, fast=False):
-                
-        if not self.bagit_output: get_status(STATUS_MSG['val_bag'], self.quiet)    
-        
-        #validate bag
-        try:
-            self.bag.validate(processes=self.processes, fast=fast)
-        except (bagit.BagValidationError, bagit.BagError) as e:
-            get_status(STATUS_MSG['val_bag'], self.quiet, fin_text=STATUS_MSG['invalid'])
-            throw_error(e, ValidationError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, Exception, quiet=self.quiet)
-        
-        get_status(STATUS_MSG['val_bag'], self.quiet, fin_text=STATUS_MSG['done'])
-        
-    #unbag content to target folder        
-    def unbag(self, outdir, make_unbag_file=False, archivematica=False, copy_bag_files=False, fast=False, inplace=False, archivematica_manifest=True):
+    # in own method for the sake of decluttering
+    def validate_bag(self, fast=False, processes=1):
     
-        times = {}    
-        times['began'] = time.localtime()
-        
-        #sorting out paths
-        paths = self.set_unbag_paths(outdir, archivematica, inplace)
-        
-        #validate bag first
-        self.validate_bag(fast=fast)
+        try:
+            self.validate(fast=fast, processes=processes)
+        except (bagit.BagError, bagit.BagValidationError) as e:
+            _throw_log_err(e)
+    
+    # setup for unbagging-in-place
+    def _inplace_setup(self, tmp):
+    
+        os.mkdir(tmp)
+        new_data_dir = self.data_path + '_' + time.strftime(TIME_FMT_METADIR, time.localtime())
+        # FIXME shouldn't the startswith account for this???
+        os.rename(self.data_path, new_data_dir) # avoid conflict if you have a folder named 'data' in bag payload
+        self.data_path = new_data_dir
+        _copy_files(self.path, tmp, copy_type='move') # move bag metadata files to temp folder
+    
+    # copy files and metadata out of bag
+    def unbag(self, outdir, processes=1, archivematica=False, copy_bag_files=False, fast=False, inplace=False, archivematica_manifest=True):
+
+        times = {'began': time.localtime()}
+        paths = self._set_unbag_paths(outdir, archivematica, inplace)
+        LOGGER.info(self.prime_alg + ' algorithm chosen for validating file copies.')
+               
+        # validate first ---------------------------/
+        _config_log('Validating Bag', self.quiet)
+        self.validate_bag(fast=fast, processes=processes)
         times['bag_validated'] = time.localtime()
                 
-        #making dirs
-        self.make_unbag_dirs(archivematica, paths, inplace)
+        # setting up dirs
+        self._make_unbag_dirs(archivematica, paths, inplace)
+        paths['tmp'] = self._tmp_dir() # avoid conflicts w/ bag files
+        if inplace: self._inplace_setup(paths['tmp'])
         
-        #parsing checksums in bag manifest
-        old_manifest = Manifest(self.alg, processes=self.processes, quiet=self.quiet)
-        old_manifest.manifest = self.read_bag_manifest()
+        # checksums of payload files ---------------/
+        if not fast:          
+            old_manifest = Manifest(self.prime_alg, processes=processes)
+            old_manifest.values = self.read_bag_manifest(self.prime_alg)
             
-        #for bag metadata during inplace unbagging
-        tmp_dir = self.setup_tmp_dir(inplace)
-        
-        #copying files from bag data folder to target        
-        get_status(STATUS_MSG['copy'], self.quiet)
-        copy_files(self.data_path, paths['unbag'], 'recursive', quiet=self.quiet)
+        # copying/moving files ---------------------/
+        _config_log('Copying Files', self.quiet)
+        _copy_files(self.data_path, paths['unbag'], recursive=True, copy_type='move' if inplace else 'copy')
         times['copied'] = time.localtime()
-        get_status(STATUS_MSG['copy'], self.quiet, fin_text=STATUS_MSG['done'])
-        
-        #validating checksums of copies vs those in bag manifest
-        get_status(STATUS_MSG['val_copies'], self.quiet)
-        exclude = [tmp_dir, self.data_path] if inplace else []
-
-        if fast:
-            try:
-                fast_compare(self.data_path, paths['unbag'], exclude=exclude, quiet=self.quiet)
-            except ManifestError as e:
-                throw_error(e, ManifestError, quiet=self.quiet)
-            except Exception as e:
-                throw_error(e, Exception, quiet=self.quiet)                
-        else:
-            new_manifest = Manifest(self.alg, processes=self.processes, quiet=self.quiet)
-            new_manifest.create(paths['unbag'], exclude=exclude)                    
-            new_manifest.compare(old_manifest.manifest)
+         
+        # validate copies --------------------------/
+        exclude = [paths['tmp'], self.data_path] if inplace else []
+        if not inplace:
+            if fast:
+                _fast_compare(self.data_path, paths['unbag'], exclude=exclude)
+            else:
+                new_manifest = Manifest(self.prime_alg, processes=processes, quiet=self.quiet, exclude=exclude)
+                prefix = '/objects/' if archivematica else '/'
+                prefix = os.path.join(outdir, self.bag_name + prefix)
+                path_tups = [(paths['unbag'], prefix)]
+                new_manifest.gen(path_tups, status_msg='Validating Copies')            
+                new_manifest.compare(old_manifest.values)    
         times['copies_validated'] = time.localtime()
         
-        #create new checksum manifest compliant with Archivematica
+        # create new checksum manifest compliant with Archivematica
         if archivematica and archivematica_manifest:
-            old_manifest.save_for_archivematica(paths['archivematica_metadata'])
+            old_manifest.write_to_text(paths['archivematica_manifest'], archivematica=True)
 
-        #Copybag metadata
-        if make_unbag_file or copy_bag_files:
-            bag_metadata_folder = self.make_bag_metadata_folder(paths['bag_metadata'])
-        if copy_bag_files:
-            self.copy_bag_files(bag_metadata_folder, tmp_dir, inplace=inplace)
-        if make_unbag_file:
-            self.make_unbag_file(bag_metadata_folder, paths['unbag'], 'unbag.txt', inplace, times, fast)        
+        # copy bag metadata ------------------------/
+        _config_log('Bag Metadata', self.quiet)
+        if copy_bag_files: 
+            paths['bag_files'] = paths['bag_metadata'] + time.strftime(TIME_FMT_METADIR, time.localtime())
+            self._copy_bag_files(paths, inplace)
+            self._make_unbag_log(paths, times, inplace, fast)
         
-        get_status(STATUS_MSG['val_copies'], self.quiet, fin_text=STATUS_MSG['done'])    
+    # info about unbagging processes
+    def _make_unbag_log(self, paths, times, inplace, fast):
     
-    #make all necessary directories for unbagging
-    def make_unbag_dirs(self, archivematica, paths, inplace):
-        
-        try:
-            if archivematica:                
-                if not inplace: os.mkdir(paths['parent'])
-                os.mkdir(paths['unbag'])
-                os.mkdir(paths['archivematica_metadata'])
-                os.mkdir(paths['submission_docs'])
-            else:    
-                if not inplace: os.mkdir(paths['unbag'])
-        except FileNotFoundError as e:
-            throw_error(e, FileNotFoundError, quiet=self.quiet)
-        except FileExistsError as e:
-            throw_error(e, FileExistsError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, Exception)
-            
-    #used to exclude checksum validation for bag metadata when unbagging inplace
-    def setup_tmp_dir(self, inplace):
+        unbag_log = UnbagLog(self.path, paths['unbag'], times, inplace=inplace, fast=fast)
+        unbag_log = UnbagLog(self.path, paths['unbag'], times, inplace=inplace, fast=fast)
+        unbag_log.write(os.path.join(paths['bag_files'], 'unbag-log.txt')) 
     
+    # move bag metadata files to own directory
+    def _copy_bag_files(self, paths, inplace=False):
+    
+        bag_metadata_path = paths['bag_metadata'] + time.strftime(TIME_FMT_METADIR, time.localtime())
+        os.mkdir(bag_metadata_path)
+
         if inplace:
-            tmp_dir = os.path.join(self.bag_path, 'tmp' + time.strftime(TIME_FMT_METADIR, time.localtime()))
-            try:
-                os.mkdir(tmp_dir)
-            except FileNotFoundError as e:
-                throw_error(e, FileNotFoundError, quiet=self.quiet)
-            except FileExistsError as e:
-                throw_error(e, FileExistsError, quiet=self.quiet)
-            except Exception as e:
-                throw_error(e, Exception, quiet=self.quiet)
-            copy_files(self.bag_path, tmp_dir, 'move', quiet=self.quiet)
-        else:
-            tmp_dir = ''
-        
-        return tmp_dir
-        
-    #copy bag metadata files when unbagging
-    def copy_bag_files(self, bag_metadata_path, tmp_dir, inplace=False):
-        
-        #copy over bag metadata and delete temp dir
-        if inplace:
-            copy_files(tmp_dir, bag_metadata_path, 'flat', quiet=self.quiet)
-            shutil.rmtree(tmp_dir)
+            _copy_files(paths['tmp'], bag_metadata_path, copy_type='move')
+            shutil.rmtree(paths['tmp'])
             shutil.rmtree(self.data_path)
         else:
-            copy_files(self.bag_path, bag_metadata_path, 'flat', quiet=self.quiet)
+            _copy_files(self.path, bag_metadata_path)
     
-    #make folder for bag metadata
-    def make_bag_metadata_folder(self, bag_metadata_path):
+    # make directories for unbagging
+    def _make_unbag_dirs(self, archivematica, paths, inplace):
+        
+        if archivematica:                
+            if not inplace: os.mkdir(paths['parent'])
+            os.mkdir(paths['unbag'])
+            os.mkdir(paths['archivematica_metadata'])
+            os.mkdir(paths['submission_docs'])
+        else:    
+            if not inplace: os.mkdir(paths['unbag'])
+
+    # used to exclude checksum validation for bag metadata when unbagging inplace
+    def _tmp_dir(self):
+    
+        return os.path.join(self.path, 'tmp' + time.strftime(TIME_FMT_METADIR, time.localtime()))
+    
+    # make folder for bag metadata
+    def _make_bag_metadata_folder(self, bag_metadata_path):
         
         bag_metadata_path += time.strftime(TIME_FMT_METADIR, time.localtime())
-        try:
-            os.mkdir(bag_metadata_path)            
-        except FileNotFoundError as e:
-            throw_error(e, FileNotFoundError, quiet=self.quiet)
-        except FileExistsError as e:
-            throw_error(e, FileExistsError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, quiet=self.quiet)
-            
+        os.mkdir(bag_metadata_path)
         return bag_metadata_path
     
-    #setup paths for unbag method
-    def set_unbag_paths(self, outdir, archivematica, inplace):
+    # setup paths for unbag method    
+    def _set_unbag_paths(self, outdir, archivematica, inplace):
     
-        paths = {}
-    
-        unbag_path_init = self.bag_path if inplace else os.path.join(outdir, self.bag_name)
+        paths = {}  
+        unbag_path_init = self.path if inplace else os.path.join(outdir, self.bag_name)
         
         '''
         path descriptions:
@@ -319,7 +272,8 @@ class BetterBag():
             [parent]/objects for archivematica, same as parent for standard unbag
         *archivematica metadata: [parent]/metadata
         *submissionDocumentation: [parent]/metadata/submissionDocumentation
-        *bag_metadata: in submissionDocumentation if archivematica, otherwise in unbag        
+        *bag_metadata: in submissionDocumentation if archivematica, otherwise in unbag
+        *archivematica_manifest: file saved in archivematica_metadata
         '''
         
         if archivematica:            
@@ -327,236 +281,193 @@ class BetterBag():
             paths['parent'] = unbag_path_init
             paths['archivematica_metadata'] = os.path.join(unbag_path_init, 'metadata')
             paths['submission_docs'] = os.path.join(paths['archivematica_metadata'], 'submissionDocumentation')
-            paths['bag_metadata'] = os.path.join(paths['submission_docs'], self.bag_name + '_bagfiles')        
+            paths['bag_metadata'] = os.path.join(paths['submission_docs'], self.bag_name + '_bagfiles')
+            paths['archivematica_manifest'] = os.path.join(paths['archivematica_metadata'], 'checksum.' + self.prime_alg)
+            
         else:    
             paths['unbag'] = unbag_path_init
             paths['bag_metadata'] = os.path.join(paths['unbag'], self.bag_name + '_bagfiles')
             paths['parent'] = ''
             paths['submission_docs'] = ''
             paths['archivematica_metadata'] = ''
+            paths['archivematica_manifest'] = ''
             
         return paths
     
-    #uses bag manifest instead of generating brand new checksums
-    def read_bag_manifest(self):
+    # uses bag manifest instead of generating brand new checksums
+    def read_bag_manifest(self, alg):
 
         manifest = []
 
-        for path, fixity in self.bag.entries.items():
-            if path.startswith('data' + os.sep):
-                pair = (path.replace('data' + os.sep, '', 1), fixity[self.alg])
+        for path, fixity in self.entries.items():
+            path = _normalize_sep(path)
+            if path.startswith('data/'):
+                path = path.replace('data/', '', 1)
+                pair = (fixity[alg], path)
                 manifest.append(pair)
                 
-        return sorted(manifest)
-        
-    #create unbag.txt in bag metadata folder
-    def make_unbag_file(self, file_path, unbag_path, filename, inplace, times, fast=False):
-        
-        fields = {
-            'bagitBB version': VERSION,
-            'OS': platform.platform(),
-            'bag name': os.path.basename(self.bag_path),
-            'origin': os.path.dirname(self.bag_path),
-            'target': 'in place' if inplace else os.path.dirname(unbag_path),
-            'unbagging began': time.strftime(TIME_FMT_UNBAG, times['began']),
-            'bag validated': time.strftime(TIME_FMT_UNBAG, times['bag_validated']),
-            'copied to target': time.strftime(TIME_FMT_UNBAG, times['copied']),
-            'copies validated': time.strftime(TIME_FMT_UNBAG, times['copies_validated'])
-        }
-        if fast:
-            fields[BAG_INFO_VAL_TYPE] = BAG_INFO_FAST
-        else:
-            fields[BAG_INFO_VAL_TYPE] = BAG_INFO_CHECKSUM
-        
-        with open(os.path.join(file_path, filename), 'w') as unbag_file: 
-            for key, value in fields.items():
-                unbag_file.write(key + ': ' + value + '\n')
-        
-    #update bag metadata in baginfo.txt
-    def update_metadata(self, metadata, manifests=False, fast=False):
+        manifest.sort(key=lambda manifest: manifest[1]) # sort by filename
+        return manifest
+
+    # update bag metadata in bag-info.txt
+    def update_metadata(self, metadata, processes=1, manifests=False, fast=False):
         
         '''appends bag-info.txt; new fields will overwrite old fields with same name
         (note that empty JSON fields are not counted and will therefore not overwrite
         anything)'''
         
-        #update fixity check type if regenerating
+        _config_log('Updating Bag', self.quiet)
+        
+        # update fixity check type if regenerating
         if manifests:
             if fast:
                 metadata[BAG_INFO_VAL_TYPE] = BAG_INFO_FAST
             else:
                 metadata[BAG_INFO_VAL_TYPE] = BAG_INFO_CHECKSUM
-                
-        #work out new metadata
-        if not self.bagit_output: get_status(STATUS_MSG['update'], self.quiet)
-        for key in metadata:
-            self.bag.info[key] = metadata[key]
         
-        #update and save
+        # work out new metadata
+        for key in metadata:
+            self.info[key] = metadata[key]
+        
+        # update and save
         try:
-            self.bag.save(processes=self.processes, manifests=manifests)
+            self.save(processes=processes, manifests=manifests)
         except (bagit.BagError, bagit.BagValidationError) as e:
-            throw_error(e, ValidationError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, Exception, quiet=self.quiet)
-        get_status(STATUS_MSG['update'], self.quiet, fin_text=STATUS_MSG['done'])
-         
+            _throw_log_err(e)
 
-#for all them checksum manifests (NOT fast comparisons)
+
+# file list with corresponding checksums
 class Manifest():
 
-    def __init__(self, alg, processes=1, quiet=True):
+    def __init__(self, alg, processes=1, exclude=[], quiet=True):
     
         self.alg = alg
-        self.manifest = []
         self.processes = processes
-        self.quiet = quiet
-    
-    #Creates a checksum manifest as a list of corresponding tuples (path, checksum)
-    def create(self, target, exclude=[]):
+        self.exclude = exclude
+        self.values = []
+        self.quiet = quiet    
         
-        file_list = self.get_file_list(target, exclude=exclude)       
-        pruned_file_list = self.prune_filenames(file_list, target)
-        hash_list = self.get_hash_list(file_list)
-        manifest = self.get_manifest(pruned_file_list, hash_list)
+    # file list generator
+    def _file_list(self, path):
         
-        self.manifest = manifest
-    
-    #list of files in manifest
-    def get_file_list(self, target, exclude=[]):
-        
-        file_list = []      
-        path = Path(target)
-        
-        if os.path.isdir(target):    
-            for f in path.rglob('*'):                
-                #ignore excluded folders; thank you, anonymous Stack Overflow person.
-                if os.path.isfile(f) and not any(p in str(f) for p in exclude):
-                    file_list.append(str(f))            
-        else:
-            file_list.append(str(target))
-        
-        return file_list
+        for f in path:
+            if os.path.isfile(f) and not any(p in str(f) for p in self.exclude):
+                yield f
 
-    #list of hash values to go with corresponding file list in manifest
-    def get_hash_list(self, file_list):
+    # let bagit generate checksum
+    def get_hash(self, filename, path_prefix='', status_msg=''):
 
-        try:
-            #generate checksums with multiprocessing (if selected) - really hope I'm using this right.
-            with multiprocessing.Pool(processes=self.processes) as pool:
-                hash_list = pool.map(self.get_hash, file_list)                        
-        except (multiprocessing.ProcessError, multiprocessing.BufferTooShort, multiprocessing.AutheticationError, multiprocessing.TimeoutError) as e:
-            throw_error(e, MultiprocessingError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, Exception, quiet=self.quiet)
-        
-        return hash_list
+        _config_log(status_msg, self.quiet)
+        return (bagit.generate_manifest_lines(str(filename), algorithms=[self.alg]), path_prefix)
     
-    #creates list of corresponding file/hash tuples
-    def get_manifest(self, file_list, hash_list):
+    # create a manifest
+    def gen(self, path_tups, status_msg=''):
         
-        #joining file list and checksum list into list of tuples
-        manifest = []                
-        for f in zip(file_list, hash_list):
-            manifest.append(f)
+        '''Takes (path name, path prefix) tuple and gens checksums using bagit-python code,
+        tacking the path prefix onto the end to create a (bagit-python list, path prefix)
+        tuple. Path prefix is chopped off from the file path so that file paths from source
+        are identical to those in target (ex: /source/path/dir1 and /target/path/dir1 both
+        become /dir1).'''
 
-        return sorted(manifest)
-    
-    #compare manifest to find checksum mismatches
-    def compare(self, target_manifest):
+        # generating checksum hashes w/ multiprocessing using bagit
+        hash_list = []      
+        pool = multiprocessing.Pool(processes=self.processes)
+        for tup in path_tups:
+            manifest_line_generator = partial(self.get_hash, path_prefix=tup[1], status_msg=status_msg)
+            if os.path.isdir(tup[0]):
+                hash_list += pool.map(manifest_line_generator, self._file_list(Path(tup[0]).rglob('*')))
+            else:
+                hash_list += pool.map(manifest_line_generator, [tup[0]])
+        pool.close()
+        pool.join()
         
-        try:
-            self.get_exception(target_manifest)
-        except ManifestError as e:
-            get_status(STATUS_MSG['val_copies'], self.quiet, fin_text=STATUS_MSG['error'])
-            throw_error(e, ManifestError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, Exception, quiet=self.quiet)
+        # sanitize list for manifest
+        manifest = self._sanitize_manifest(hash_list)
+        manifest.sort(key=lambda manifest: manifest[1]) # sort by filename
+        self.values = manifest
+
+    # remove filepath prefix and make list of (checksum, filepath) tuples
+    def _sanitize_manifest(self, hash_list):
     
-    #raise exception for manifest comparisons
-    def get_exception(self, target_manifest):
+        manifest = []
+        for val in hash_list:
+            path_prefix = _normalize_sep(val[1])
+            checksum = val[0][0][1]
+            filename = _normalize_sep(val[0][0][2]).replace(path_prefix, '')
+            manifest.append((checksum, filename))
+        return manifest
+
+    # compare two manifests
+    def compare(self, target_values):
     
-        #if the lengths don't match, it's obviouly a fail
-        if len(target_manifest) != len(self.manifest):
-            raise ManifestError('Number of copied files do not match source')
+        # length check
+        if len(target_values) != len(self.values):
+            _throw_log_err('Number of copied files do not match source')
                 
-        #check for mismatches
-        for x in range(len(target_manifest)):
-            if self.manifest[x][1] != target_manifest[x][1]:
-                raise ManifestError('Checksum mismatch')
-                    
-    #generate checksum hash for a file
-    def get_hash(self, filename):
+        # check for mismatches
+        for i in range(len(target_values)):
+            if self.values[i][0] != target_values[i][0] or self.values[i][1] != target_values[i][1]:
+                _throw_log_err('Checksum mismatch: ' + str(self.values[i][1]))
 
-        #another snippet from Stack Overflow. I owe you, random person. Be well.
-
-        if self.alg == 'md5':
-            checksum = hashlib.md5()
-        elif self.alg == 'sha256':
-            checksum = hashlib.sha256()
-        with open (filename, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b''):
-                checksum.update(chunk)
-        return checksum.hexdigest()
-    
-    #remove leading part of path name relative to target dir
-    #for the sake of sorting and comparing with other manifests
-    def prune_filenames(self, file_list, target):
-    
-        pruned_file_list = []
-        for f in file_list:
-            f = f.replace(os.path.dirname(target) + os.sep, '')
-            pruned_file_list.append(f)
-        return pruned_file_list
+    # save manifest to text file (ex: for archivematica)
+    def write_to_text(self, file_path, str_chop='', archivematica=False, overwrite='w'):
         
-    #convert manifest to format compatible with Archivematica and save
-    def save_for_archivematica(self, save_target):
+        with open(file_path, overwrite) as text_file:    
+            for v in self.values:
+                v = list(v)
+                if archivematica: v[1] = '../objects/' + v[1] 
+                line = v[0] + ' ' + v[1] + '\n'
+                text_file.write(line)       
+
+    # save manifest to csv
+    def write_to_csv(self, write_path, overwrite='w'):
     
-        '''Formatted for Archivematica version 1.14.1. See documentation for
-        Archivematica, created by Artefactual Systems, for more information
-        on the formatting in this file: https://www.archivematica.org/en/docs/'''
-        
-        with open(save_target + os.sep + 'checksum.' + self.alg, 'w') as new_manifest:    
-            for x in self.manifest:
-                x = list(x)
-                x[0] = '../objects/' + x[0]
-                line = x[1] + ' ' + x[0] + '\n'
-                new_manifest.write(line)
+        with open(write_path, overwrite, newline='') as csv_file:
+            writer = csv.writer(csv_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+            for v in self.values:
+                writer.writerow(v)    
 
 
-#creation of metadata and submission docs for bags
+# creation of metadata and submission docs for bags
 class BagMetadata():
 
-    def __init__(self, manual_fields={}, json=None, manifest_update=False, quiet=True):
+    def __init__(self, manual_fields={}, json=None, manifest_update=False):
     
         self.manual_fields = manual_fields
         self.json = json
         self.manifest_update = manifest_update
-        self.quiet = quiet
         self.metadata = {}
         self.doc_list = []
         
-    #setup metadata content for bag-info.txt
-    def set_bag_metadata(self):
+    # setup metadata content for bag-info.txt
+    def set_bag_metadata(self, ignore_sub_docs=False):
 
         if self.json != None:
-            self.read_json()
+            self._read_json()
             if SUB_DOC_KEY in self.metadata:
-                self.get_sub_docs()
-                self.fmt_sub_doc_text()
-            self.parse_bag_metadata()
+                if ignore_sub_docs:
+                    self.metadata['submission documentation'] = ''
+                else:
+                    self._get_sub_docs()
+                    self._fmt_sub_doc_text()
+            self._parse_bag_metadata()
         
         elif len(self.manual_fields) != 0:
             self.metadata = self.manual_fields
-            self.parse_bag_metadata()
+            self._parse_bag_metadata()
 
-    #list of submission documents to copy with bag
-    def get_sub_docs(self):
+    # list of submission documents to copy with bag
+    def _get_sub_docs(self):
 
-        for key in self.metadata[SUB_DOC_KEY]:
-            self.doc_list.append(os.path.abspath(self.metadata[SUB_DOC_KEY][key]))
-    
-    #reformat submission docs listed in json file for display in bag-info.txt
-    def fmt_sub_doc_text(self):  
+        sub_docs = []
+        for key, value in self.metadata[SUB_DOC_KEY].items():
+            if not os.path.isfile(value):
+                raise FileNotFoundError('Submission document not found: ' + str(value))
+            sub_docs.append(os.path.abspath(value))
+        self.doc_list = sub_docs
+        
+    # reformat submission docs listed in json file for display in bag-info.txt
+    def _fmt_sub_doc_text(self):  
 
         text = ''
 
@@ -565,172 +476,225 @@ class BagMetadata():
             text += x + ' (' + filename + ')'
             text += ', '
         text = text[:-2]
-
         self.metadata[SUB_DOC_KEY] = text
 
-    #parse JSON file for bag-info.txt metadata
-    def read_json(self):
+    # parse JSON file for bag-info.txt metadata
+    def _read_json(self):
 
-        try:
-            with open(self.json, 'r') as json_file:
-                self.metadata = json.loads(json_file.read())
-        except FileNotFoundError as e:
-            throw_error(e, FileNotFoundError, quiet=self.quiet)
-        except json.JSONDecodeError as e:
-            throw_error('JSON error: ' + str(e), JSONError, quiet=self.quiet)
-        except Exception as e:
-            throw_error(e, Exception, quiet=self.quiet)
-            
-    #remove metadata fields for bag-info.txt that user did not enter information for
-    def parse_bag_metadata(self):
+        with open(self.json, 'r') as json_file:
+            self.metadata = json.loads(json_file.read())
+                
+    # remove metadata fields for bag-info.txt that user did not enter information for
+    def _parse_bag_metadata(self):
 
         metadata_list = list(self.metadata)
         for x in range(len(self.metadata)):
             if self.metadata[metadata_list[x]] == None or self.metadata[metadata_list[x]] == '':
                 del self.metadata[metadata_list[x]]
 
-        #to document when the info in baginfo.txt and/or manifest was last updated
+        # to document when the info in baginfo.txt and/or manifest was last updated
         if len(self.metadata) != 0:
-            self.metadata['Bag info last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
+            self.metadata['Bag info last updated'] = time.strftime(TIME_FMT_LOG, time.localtime())
         if self.manifest_update:
-            self.metadata['Bag manifests last updated'] = time.strftime(TIME_FMT_UNBAG, time.localtime())
+            self.metadata['Bag manifests last updated'] = time.strftime(TIME_FMT_LOG, time.localtime())
 
 
-#Custom exceptions - probably don't need all of these, but I'm still learning                
+# log superclass
+class Log():
 
-class ManifestError(Exception):
-    pass  
+    def __init__(self, src, target):
 
-class OptError(Exception):
-    pass
+        self.src = src
+        self.target = target
+        self.fields = {'bagitBB version': VERSION, 'OS': platform.platform()}
 
-class ValidationError(Exception):
-    pass
+    def write(self, save_path, array_indent=4):
+
+        with open(save_path, 'w') as log: 
+            for key, value in self.fields.items():
+                if type(value) == list or type(value) == tuple or type(value) == set:
+                    if len(value) > 1:
+                        log.write(key + ':\n')
+                        for item in value:
+                            log.write(' ' * array_indent + str(item) + '\n')
+                    else:
+                        log.write(key + ': ' + value[0] + '\n')
+                else:
+                    log.write(key + ': ' + value + '\n')
+
+
+# log for bagging
+class BagLog(Log):
+
+    def __init__(self, src, target, times, inplace=False, fast=False):
     
-class CopyError(Exception):
-    pass
+        super().__init__(src, target)
+        self.inplace = inplace
+        self.fast = fast
+        self.times = times
+
+        self.fields['bag name'] = os.path.basename(target)
+        self.fields['origin'] = src
+        self.fields['target'] = target if inplace else os.path.dirname(target)
+        self.fields['in-place'] = 'Yes' if inplace else 'No'
+        self.fields['validation type'] = 'Fast' if fast else 'checksum validation'
+        self.fields['began'] = time.strftime(TIME_FMT_LOG, times['began'])
+        self.fields['checksums generated'] = 'n/a' if fast or inplace else time.strftime(TIME_FMT_LOG, times['checksum_gen'])
+        self.fields['files copied to target'] = 'n/a' if inplace else time.strftime(TIME_FMT_LOG, times['copied'])
+        self.fields['bagged'] = time.strftime(TIME_FMT_LOG, times['bagged'])
+        self.fields['copies validated'] = 'n/a' if inplace else time.strftime(TIME_FMT_LOG, times['validated']) 
+
+
+# log for unbagging
+class UnbagLog(Log):
+
+    def __init__(self, src, target, times, inplace=False, fast=False):
     
-class MultiprocessingError(Exception):
-    pass
-
-class JSONError(Exception):
-    pass
-
+        super().__init__(src, target)
+        self.inplace = inplace
+        self.fast = fast
+        self.times = times
+    
+        self.fields['bag name'] = os.path.basename(src),
+        self.fields['origin'] = os.path.dirname(src),
+        self.fields['target'] = target if inplace else os.path.dirname(target),
+        self.fields['in-place'] = 'Yes' if inplace else 'No',
+        self.fields['validation type'] = 'Fast' if fast else 'checksum validation',
+        self.fields['unbagging began'] = time.strftime(TIME_FMT_LOG, times['began']),
+        self.fields['bag validated'] = time.strftime(TIME_FMT_LOG, times['bag_validated']),
+        self.fields['copied to target'] = time.strftime(TIME_FMT_LOG, times['copied']),
+        self.fields['copies validated'] = time.strftime(TIME_FMT_LOG, times['copies_validated'])
 
 
 '''*** operational functions ***'''
 
-#create bag
-def bag_files(indirs, outdir, alg, inplace=False, metadata={}, processes=1, quiet=True, fast=False, compression=0, bagit_output=False, sub_docs=[]):
+# create bag
+def bag_files(indirs, outdir, algs=['sha256'], inplace=False, metadata={}, processes=1, quiet=True, fast=False, sub_docs=[]):
+
+    times = {'began': time.localtime()}
     
-    #confirm submission docs exist
-    if len(sub_docs) != 0:
-        for x in sub_docs:
-            if not os.path.isfile(x):
-                throw_error('Submission document not found: ' + str(x), FileNotFoundError, quiet=quiet)
-    
-    #mandatory custom metadata for bag-info.txt
+    # mandatory metadata for bag-info.txt
     metadata[BAG_INFO_VERSION] = 'bagit.py ' + bagit.VERSION + ' ' + bagit.PROJECT_URL + ' (via bagitbb.py v.' + VERSION + ')'
     metadata[BAG_INFO_VAL_TYPE] = BAG_INFO_FAST if fast else BAG_INFO_CHECKSUM
-    
-    #turn on bagit output
-    if bagit_output and not quiet: bagit.logging.basicConfig(level=bagit.logging.INFO)
-        
-    #if bagging in place
-    if inplace:
-        get_status(STATUS_MSG['bag'], quiet)
-        bag = bagit.make_bag(indirs[0], checksums=[alg], bag_info=metadata, processes=processes)
-        get_status(STATUS_MSG['bag'], quiet, fin_text=STATUS_MSG['done'])
-        return
 
-    #make target dir        
+    # bagging-in-place -------------------------/
+    if inplace:
+        _config_log('Bagging', quiet)
+        bag = _bag_inplace(indirs[0], algs, metadata, processes=processes, sub_docs=sub_docs)
+        times['bagged'] = time.localtime()
+        bag_log = BagLog(indirs[0], indirs[0], times, inplace=inplace, fast=fast)
+        bag_log.write(os.path.join(indirs[0], 'bag-log.txt'))
+        return bag
+
     os.mkdir(outdir)
+    prime_alg = _prime_alg(algs)
+    LOGGER.info(prime_alg + ' algorithm chosen for validating file copies.')
     
-    #initialize manifest var
-    old_manifest = Manifest(alg, processes=processes, quiet=quiet)
+    # get checksums of originals ---------------/
+    path_tups = [] # (path, path prefix to be removed)
+    if not fast:
+        for path in indirs:
+            prefix = os.path.dirname(path) + '/'
+            path_tups.append((path, prefix))
+        old_manifest = Manifest(prime_alg, processes=processes, quiet=quiet)
+        old_manifest.gen(path_tups, status_msg='Analyzing')
+        times['checksum_gen'] = time.localtime()     
     
-    #process loop for every dir or file in indirs
-    for x in range(len(indirs)):
-        if not quiet:
-            if x != 0: print()
-            print('[directory ' + str(x+1) + '/' + str(len(indirs)) + ']')
-        
-        #add checksums of dir/file to master manifest
-        if not fast:
-            get_status(STATUS_MSG['analyze'], quiet)
-            current_manifest = Manifest(alg, processes=processes, quiet=quiet)
-            current_manifest.create(indirs[x])
-            old_manifest.manifest += current_manifest.manifest
-            get_status(STATUS_MSG['analyze'], quiet, fin_text=STATUS_MSG['done'])
-        
-        #copy source files to destination dir
-        get_status(STATUS_MSG['copy'], quiet)
-        if os.path.isdir(indirs[x]):
-            target_dir = os.path.join(outdir, os.path.basename(indirs[x]))
+    # copy source files to destination dir -----/
+    _config_log('Copying', quiet)
+    for src in indirs:
+        if os.path.isdir(src):
+            target_dir = os.path.join(outdir, os.path.basename(src))
             compare_path = target_dir #used for fast compare
+            recursive = True
         else:
             target_dir = outdir
-            compare_path = os.path.join(target_dir, os.path.basename(indirs[x])) #used for fast compare
-        if os.path.isdir(indirs[x]):
-            copy_files(indirs[x], target_dir, 'recursive', quiet=quiet)
-        else:
-            copy_files(indirs[x], target_dir, 'file', quiet=quiet)
-        get_status(STATUS_MSG['copy'], quiet, fin_text=STATUS_MSG['done'])
+            compare_path = os.path.join(target_dir, os.path.basename(src)) #used for fast compare
+            recursive = False
+        _copy_files(src, target_dir, recursive=recursive)
+    times['copied'] = time.localtime()
 
-        #fast compare
-        if fast:
-            get_status(STATUS_MSG['val_copies'], quiet)
-            try:
-                fast_compare(indirs[x], compare_path, quiet=quiet)
-            except ManifestError as e:
-                throw_error(e, ManifestError, quiet=quiet)
-            except Exception as e:
-                throw_error(e, Exception)
-            get_status(STATUS_MSG['val_copies'], quiet, fin_text=STATUS_MSG['done'])
-
-    if not quiet: print()
+    # fast compare -----------------------------/
+    if fast:
+        _config_log('Validating Copies', quiet)
+        _fast_compare(src, compare_path)
+        times['validated'] = time.localtime()
     
-    #bag copied files
-    if not bagit_output: get_status(STATUS_MSG['bag'], quiet)
-    bag = bagit.make_bag(outdir, checksums=[alg], bag_info=metadata, processes=processes)
-    get_status(STATUS_MSG['bag'], quiet, fin_text=STATUS_MSG['done'])
+    # bag copied files -------------------------/
+    _config_log('Bagging', quiet)
+    bag = _bag_inplace(outdir, algs, metadata, processes=processes, sub_docs=sub_docs)
+    times['bagged'] = time.localtime()
     
-    #setup BetterBag object
-    better_bag = BetterBag(bag.path)
-    
-    #checksum validating bag copies
+    # checksum validating bag copies -----------/
     if not fast:
-        get_status(STATUS_MSG['val_copies'], quiet)        
-        old_manifest.manifest.sort()
-        #get checksums of copies from bag manifest        
-        new_manifest = Manifest(better_bag.alg, processes=processes, quiet=quiet)
-        new_manifest.manifest = better_bag.read_bag_manifest()
-        new_manifest.compare(old_manifest.manifest)
-        get_status(STATUS_MSG['val_copies'], quiet, fin_text=STATUS_MSG['done'])
+        _config_log('Validating', quiet)         
+        new_manifest = Manifest(bag.prime_alg, processes=processes)
+        LOGGER.info('Comparing bag manifest to original checksums')
+        new_manifest.values = bag.read_bag_manifest(prime_alg)
+        new_manifest.compare(old_manifest.values)
+        times['validated'] = time.localtime()
 
-    #copy submission docs
+    # make baglog.txt
+    bag_log = BagLog(indirs, outdir, times, inplace=inplace, fast=fast)
+    bag_log.write(os.path.join(outdir, 'bag-log.txt'))
+    
+    return bag 
+
+
+# create BetterBag from bagit.Bag
+def _bag_inplace(path, algs, metadata, processes=1, sub_docs=[]):
+
+    bag = BetterBag(bagit.make_bag(path, checksums=algs, bag_info=metadata, processes=processes).path)   
+    
+    # manifest to csv
+    for alg in bag.algorithms: 
+        manifest = Manifest(alg, processes=processes)
+        manifest.values = bag.read_bag_manifest(alg)
+        csv_path = os.path.join(path, 'manifest-' + alg + '.csv')
+        manifest.write_to_csv(csv_path)
+    
+    # copy submission documentation
     if len(sub_docs) > 0:
         for doc in sub_docs:
-            copy_files(doc, bag.path, 'file')
+            _copy_files(doc, bag.path)
+    return bag
 
-    return better_bag
+
+# use only '/' as separator (as per bagit standard)
+def _normalize_sep(path):
+
+    split = path.split(os.sep)
+    path = ''
+    for part in split: path += part + '/'
+    path = path[:-1]
+    return path
 
 
-#validate bags and copies using only file size and quantity (as per bagit.py option)
-def fast_compare(indir, outdir, exclude=[], quiet=True):
+# which alg to use for validating copies if multiple are selected
+def _prime_alg(algs):
+
+    # if alg not in alg rank, use first encountered
+    for alg in ALG_RANK:
+        if alg in algs:
+            return alg
+    return algs[0]
+
+
+# validate bags and copies using only file size and quantity (as per bagit-python option)
+def _fast_compare(indir, outdir, exclude=[]):
     
-    indir_size, indir_count = get_file_details(indir)
-    outdir_size, outdir_count = get_file_details(outdir, exclude=exclude)        
+    LOGGER.info('Validating copies (fast)')
+    
+    indir_size, indir_count = _get_file_details(indir)
+    outdir_size, outdir_count = _get_file_details(outdir, exclude=exclude)        
         
     if indir_size != outdir_size or indir_count != outdir_count:
-        get_status(STATUS_MSG['val_copies'], quiet, fin_text=STATUS_MSG['error'])
         err_msg = 'Expected ' + str(indir_count) + ' files and ' + str(indir_size) + ' bytes, but found ' + str(outdir_count) + ' files and ' + str(outdir_size) + ' bytes.'
-    
-        raise ManifestError(err_msg)
+        LOGGER.error(err_msg)
 
 
-#get file size and quantity for fast validation option                
-def get_file_details(target, exclude=[]):
+# get file size and quantity for fast validation option                
+def _get_file_details(target, exclude=[]):
 
     count = 0
     size = 0
@@ -739,11 +703,11 @@ def get_file_details(target, exclude=[]):
         path = Path(target)
         for filename in path.rglob('*'):
             if os.path.isfile(filename):
-                if len(exclude) == 0: #no excluded dirs/files to worry about
+                if len(exclude) == 0: # no excluded dirs/files to worry about
                     size += os.stat(filename).st_size
                     count += 1
                 else:
-                    if not any(p in str(filename) for p in exclude): #for excluding
+                    if not any(p in str(filename) for p in exclude): # for excluding
                         size += os.stat(filename).st_size
                         count += 1
     elif os.path.isfile(target):
@@ -752,34 +716,61 @@ def get_file_details(target, exclude=[]):
     
     return size, count
 
+
+# file copying
+def _copy_files(src, dest, recursive=False, copy_type='copy'):
+
+    if recursive:               
+        _copy_recursive(src, dest, copy_type=copy_type)
         
-#file copying
-def copy_files(src, dest, copy_type, quiet=True):
-
-    try:
-        if copy_type == 'recursive': #copy dir and all subdirs        
-            shutil.copytree(src, dest, dirs_exist_ok=True)
-        elif copy_type == 'file': #copy single file only
+    else:
+        if os.path.isdir(src):
+            path = Path(src)
+            for filename in sorted(path.glob('*')):
+                if os.path.isfile(filename):
+                    if copy_type == 'copy':
+                        LOGGER.info('Copying file ' + str(filename))
+                        shutil.copy2(filename, dest)
+                    elif copy_type == 'move':
+                        LOGGER.info('Moving file ' + str(filename))
+                        shutil.move(filename, dest)
+        else:
+            if copy_type == 'copy':
+                LOGGER.info('Copying file ' + str(src))
                 shutil.copy2(src, dest)
-        elif copy_type == 'flat': #copy dir, but no subfolders
-            path = Path(src)
-            for filename in sorted(path.glob('*')):
-                if os.path.isfile(filename):
-                    shutil.copy2(filename, dest)
-        elif copy_type == 'move': #move flat
-            path = Path(src)
-            for filename in sorted(path.glob('*')):
-                if os.path.isfile(filename):
-                    shutil.move(filename, dest)
-    
-    except shutil.Error as e:
-        throw_error(e, CopyError, quiet=quiet)
-    
-    except Exception as e:
-        throw_error(e, Exception, quiet=quiet)
+            elif copy_type == 'move':
+                LOGGER.info('Moving file ' + str(src))
+                shutil.move(src, dest)
 
 
-def confirm_task(question_text, cancel_text):
+# for recursive copying
+def _copy_recursive(src, dest, copy_type='copy'):
+    
+    '''Yeah, I know I could use shutil.copytree(), but I wanted to be able
+    to give status updates after each file copied. When something takes 10
+    hours, I like to know where I'm at.'''
+    
+    count = 0
+    src_path = Path(src)
+    for f in src_path.rglob('*'):
+        if os.path.isfile(f):
+            split = str(os.path.dirname(f)).split(str(src))
+            if split[1].startswith(os.sep):
+                split[1] = split[1][1:]
+            new_path = os.path.join(dest, split[1])
+            dest_path = Path(new_path)
+            dest_path.mkdir(parents=True, exist_ok=True)
+            if copy_type == 'copy':
+                LOGGER.info('Copying file ' + str(f))
+                shutil.copy2(f, new_path)
+            elif copy_type == 'move':
+                LOGGER.info('Moving file ' + str(f))
+                shutil.move(f, new_path)
+            count += 1
+
+
+# risky tasks require confirmation
+def _confirm_task(question_text, cancel_text):
     
     '''NOTE: this prompt will not trigger in quiet mode.
     You've been warned.'''
@@ -796,103 +787,94 @@ def confirm_task(question_text, cancel_text):
             
 
 
-'''*** arg and opt functions ***'''
+''' *** console opt and arg management *** '''
 
-#create options and args via optparse module
-def setup_opts():
+# setup argparse options
+def _setup_opts():
 
-    logo = print_logo()
-
-    usage = logo + '\n\n'
-    usage += 'Copyright 2023 Jarad Buckwold - free to use or alter as needed; credit is appreciated, but not required.\n\n'
-    usage += 'v' + VERSION + ' (bagit.py v' + bagit.VERSION + ')\n\n'
-    usage += '%prog [options] [mode] [input dir1] [input dir2] [...] [output dir]\n\nBags files using Library of Congress\' Bagit python module, but can bag files to a target directory\ninstead of just bagging them in place. Can similarly unbag to target directory. In both cases,\nchecksums are generated prior to copying files and then compared to those generated from the copied\nfiles in the target folder, ensuring file integrity.\n\n\n'
-    usage += 'MODES:\n\n'
-    usage += 'bag\n\n    Bags one or more folders or files to target folder.\n    ex: %prog --accession-number A2020-335 bag /home/folder1 /home/file1.file /home/bags/bag1\n\n'
-    usage += 'unbag\n\n    Unbags preexisting bag and bag metadata to target folder.\n    ex: %prog unbag /home/bags/bag1 /home/unbagged_files\n\n'
-    usage += 'validate\n\n    Validates integrity of existing bag.\n    ex: %prog validate /home/bags/bag1\n\n'
-    usage += 'update\n\n    Updates metadata in bag-info.txt (fields with same names will be overwriten). Regenerates manifests if regen option is used.\n    ex: %prog -j /path/to/json.json update /path/to/bag1\n\n'
-    usage += 'Note: for bash shell (not sure about others), wildcard * character can be used for bagging to target (NOT for anything else) only if there are NO loose files in the base directory.\n\n\n'
-    usage += 'SUBMISSION DOCUMENTS\n\n'
-    usage += 'Use ' + SUB_DOC_KEY + ' heading in json metadata to identify documents to copy alongside bagit.txt and bag-info.txt (ie outside the /data folder).\n'
-    usage += 'ex:\n'
-    usage += '"' + SUB_DOC_KEY + '": {\n    "accession form": "/path/to/accession.pdf",\n    "format report": "/path/to/report.txt"\n}'
-    
-    
-    parser = OptionParser(usage=usage)
-
-    #operational options
-    parser.add_option(
-        '-a',
-        '--algorithm',
-        action = 'store',
-        type = 'string',
-        dest = 'alg',
-        default = 'sha256',
-        help = 'Algorithm used to generate checksums both for copied files and for bag. Choose either sha256 (default) or md5. ex: -c md5'
+    # use bagit parser to properly access metadata options
+    parser = bagit.BagArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description = __doc__ + 'OPTIONS AND ARGUMENTS\n----------------------',
+        epilog = 'Copyright 2024 Jarad Buckwold. Feel free to use, alter, and distribute as you see fit. Credit is nice, but not required.'
     )
-    parser.add_option(
+    
+    # positional args
+    parser.add_argument(
+        'source',
+        nargs='+',
+        help='Directories or files your records are being bagged from (bagging) or the top directory of the bag (unbagging, validating, updating). \
+        Can have multiple sources when bagging.'
+    )
+    #FIXME
+    # I can't figure out how to have an ambiguous pos arg followed by an optional pos arg, so this is just a place-holder for help menu w/ None value.
+    # All path data is stored in source arg
+    parser.add_argument(
+        'target',
+        nargs = '?',
+        default = None,
+        help='Directory where files are bagged or unbagged to. Unused if validating, updating, or bagging/unbagging-in-place.'
+    )
+    
+    # stand-alone options
+    parser.add_argument(
+        '-m',
+        '--mode',
+        action = 'store',
+        type = str,
+        default = 'bag',
+        dest = 'mode',
+        help = 'Action being performed. Choose "bag" to make a bag (default), "unbag" to unbag an existing bag, "validate" to validate an existing bag, \
+        or "update" to update the metadata or manifest of an existing bag.'
+    )
+    parser.add_argument(
         '-i',
-        '--inplace',
+        '--in-place',
         action = 'store_true',
         dest = 'inplace',
-        help = 'Bags or unbags files in place (ie does not copy files to target). Bag in place is default bagit.py functionality.'
+        help = 'Bags or unbags files in-place (ie does not copy files to target). Bag-in-place is default bagit-python functionality.'
     )
-    parser.add_option(
-        '-A',
+    parser.add_argument(
+        '-a',
         '--archivematica',
         action = 'store_true',
         dest = 'archivematica',
-        help = 'Unbags in target directory structured for use with Artefactual Systems\' Archivematica software. Made with Archivematica v' + ARCHIVEMATICA_VERSION + ' in mind. See ' + ARCHIVEMATICA_URL + ' for details.'
+        help = 'Unbags in target directory structured for use with Artefactual Systems\' Archivematica software. Made with Archivematica \
+        v' + ARCHIVEMATICA_VERSION + ' in mind. See ' + ARCHIVEMATICA_URL + ' for details.'
     )
-    parser.add_option(
+    parser.add_argument(
         '-j',
         '--json',
         action = 'store',
-        type = 'string',
+        type = str,
         dest = 'json',
-        help = 'Import bag metadata for bag-info.txt from json file instead of using options. Metadata from options will be ignored. Can also be used to identify submission documents to bag algonside bagit.txt and bag-info.txt (see usage instructions above). ex: -j /path/to/metadata.json'
+        help = 'Import bag metadata for bag-info.txt from json file instead of using options. Metadata from options will be ignored. \
+        Can also be used to identify submission documentation using keyword "' + SUB_DOC_KEY + '".'
     )
-    parser.add_option(
+    parser.add_argument(
         '-q',
         '--quiet',
         action = 'store_true',
         default = False,
         dest = 'quiet',
-        help = 'Hide progress updates. Errors will raise exceptions instead of messages. NOTE: you will not be prompted to confirm when unbagging in place or updating a bag manifest.'
+        help = 'Hide progress updates. NOTE: you will not be prompted to confirm when unbagging-in-place or updating a bag manifest.'
     )
-    parser.add_option(
-        '-v',
-        '--version',
-        action = 'store_true',
-        default = False,
-        dest = 'version',
-        help = 'Show version (ignores other options/args).'
-    )
-    parser.add_option(
+    parser.add_argument(
         '-p',
         '--processes',
         action = 'store',
-        type = 'int',
+        type = int,
         default = 1,
-        help = 'Number of parallel processes used to create, validate, or update bag. Original bagit.py option. Ex. -p 8'
+        help = 'Number of parallel processes used to create, validate, or update bag, and to generate checksums for originals/copies.'
     )
-    parser.add_option(
+    parser.add_argument(
         '-f',
         '--fast',
         action = 'store_true',
         default = False,
-        help = 'Only compare total size and number of files when validating bags and copied files. Original bagit.py option.'
+        help = 'Only compare total size and number of files when validating bags and copied files (ie no checksums).'
     )
-    parser.add_option(
-        '-x',
-        '--no-bag-files',
-        action = 'store_false',
-        default = True,
-        dest = 'copy_bag_files',
-        help = 'Don\'t copy bag metadata when unbagging.'
-    )
-    parser.add_option(
+    parser.add_argument(
         '-r',
         '--regen',
         action = 'store_true',
@@ -900,147 +882,121 @@ def setup_opts():
         dest = 'update_manifest',
         help = 'Regenerate manifest when updating bag. Ignored if not using update mode.'
     )
-    parser.add_option(
+    parser.add_argument(
+        '-x',
+        '--no-bag-files',
+        action = 'store_false',
+        default = True,
+        dest = 'copy_bag_files',
+        help = 'Don\'t copy bag metadata when unbagging.'
+    )
+    parser.add_argument(
         '-X',
         '--no-manifest',
         action = 'store_false',
         default = True,
         dest = 'no_manifest',
-        help = 'Don\'t create a checksum manifest for metadata folder. For use when unbagging for Archivematica, otherwise ignored.'
+        help = 'Don\'t save a checksum manifest when using Archivematica mode.'
     )
-    parser.add_option(
-        '--bagit-output',
-        action = 'store_true',
-        default = False,
-        dest = 'bagit_output',
-        help = 'Show output from bagit.py. Quiet mode supersedes this option.'
+    parser.add_argument(
+        '--version',
+        action = 'version',
+        version = '%(prog)s ' + VERSION,
+        dest = 'version',
+        help = 'Show version and exit.'
     )
-        
-        
-    #metadata options
-    meta_group = OptionGroup(parser, 'metadata fields', 'Fields used to record metadata in baginfo.txt document. Only used for bagging and bagging in place and ignored if json option is used. ex: --accession-num A2010-34 --notes "notes go here"')
-    meta_group.add_option('--accession-number', action='store', type='string', dest='accession_num')
-    meta_group.add_option('--department', action='store', type='string', dest='department')
-    meta_group.add_option('--contact-name', action='store', type='string', dest='contact_name')
-    meta_group.add_option('--contact-title', action='store', type='string', dest='contact_title')
-    meta_group.add_option('--contact-email', action='store', type='string', dest='contact_email')
-    meta_group.add_option('--contact-phone', action='store', type='string', dest='contact_phone')
-    meta_group.add_option('--contact-address', action='store', type='string', dest='contact_address')
-    meta_group.add_option('--records-schedule-number', action='store', type='string', dest='records_schedule_num')
-    meta_group.add_option('--bag-size', action='store', type='string', dest='bag_size')
-    meta_group.add_option('--record-dates', action='store', type='string', dest='record_dates')
-    meta_group.add_option('--description', action='store', type='string', dest='description')
-    meta_group.add_option('--notes', action='store', type='string', dest='notes')
-    parser.add_option_group(meta_group)
-
-    (options, args) = parser.parse_args()
     
-    return options, args
+    # algorithm options
+    alg_group = parser.add_argument_group('Checksum Algorithms (default sha256)')
+    for alg in bagit.CHECKSUM_ALGOS:
+        alg_group.add_argument(
+            '--' + alg,
+            action = 'append_const',
+            const = alg,
+            dest = 'algs'
+         )
+    
+    # metadata options   
+    metadata_args = parser.add_argument_group('Optional Bag Metadata')
+    for header in bagit.STANDARD_BAG_INFO_HEADERS:
+        metadata_args.add_argument(
+            '--%s' % header.lower(), type=str, action=bagit.BagHeaderAction, default=argparse.SUPPRESS
+        )
+
+    return parser
 
 
-#determine operation
-def get_mode(arguments):
+# make sure not bagging/unbagging-in-place the dir this program is in
+def _safe_inplace(parser, indir):
+
+    this_file_path = os.path.realpath(__file__)
+    this_file_name = os.path.basename(this_file_path)
+    if os.path.isfile(os.path.join(indir, this_file_name)):
+        parser.error('Cannot bag/unbag-in-place directory containing ' + this_file_name)
+
+
+# determine operation
+def _get_mode(arg, parser):
 
     mode = None
-    valid_modes = ['bag', 'unbag', 'validate', 'update']
-    
+    valid_modes = ['bag', 'unbag', 'validate', 'update']   
     for m in valid_modes:
-        if arguments[0].lower() == m:
+        if arg.lower() == m:
             mode = m
-    if mode == None:
-        raise OptError('invalid mode.')
-
+    if mode == None: parser.error('Invalid mode.')
     return mode
 
 
-#check for positional arg errors
-def parse_args(arguments, inplace, mode):
-    
-    #number of args each mode should have
-    num_args = {
-        'bag': 2, #only in place, since args can otherwise be infinite
-        'unbag': 2 if inplace else 3,
-        'validate': 2,
-        'update': 2
-    }
+# assign source and target paths
+def _get_paths(mode, paths, inplace, parser):
 
-    #validate number of args (bagging to target can have infinite)
+    for i in range(len(paths)):
+        paths[i] = os.path.abspath(paths[i])
+
     if mode == 'bag' and not inplace:
-        if len(arguments) < 3:
-            raise OptError('wrong number of arguments')
-    else:
-        if len(arguments) != num_args[mode]:
-            raise OptError('wrong number of arguments')
-
-    #convert args to absolute paths
-    for x in range(len(arguments)):
-        arguments[x] = os.path.abspath(arguments[x])
-    arguments.remove(arguments[0])
+        if len(paths) < 2: parser.error('Wrong number of arguments.')
+        outdir = paths[-1]
+        del paths[-1]
+        indirs = paths
+        _find_path_err(outdir, False, parser)
+        _find_path_err(os.path.dirname(outdir), True, parser)
     
-    return arguments
-
-
-#set source and target paths
-def get_paths(arguments):
-
-    indirs = []
+    elif mode == 'unbag' and not inplace:
+        if len(paths) != 2: parser.error('Wrong number of arguments.')
+        outdir = paths[-1]
+        del paths[-1]
+        indirs = paths 
+        _find_path_err(os.path.join(outdir, os.path.basename(indirs[0])), False, parser)
+        _find_path_err(outdir, True, parser)
     
-    if len(arguments) == 1:
-        indirs.append(arguments[0])
+    elif mode == 'validate' or mode == 'update' or inplace:
+        if len(paths) != 1: parser.error('Wrong number of arguments.')
+        indirs = paths
         outdir = None
-    elif len(arguments) >= 2:
-        for i in range(len(arguments)-1):
-            indirs.append(arguments[i])
-        outdir = arguments[len(arguments)-1]
-    
+
+    for i in indirs:
+        _find_path_err(i, True, parser, file_ok=True if mode=='bag' else False)
+
     return indirs, outdir
-
-
-#manage path collisions and non-existing paths
-def check_paths(indirs, outdir, mode):
-
-    #check for indir path issues
-    for i in range(len(indirs)):
-        if not os.path.isfile(indirs[i]) and not os.path.isdir(indirs[i]):
-            raise FileNotFoundError('File or directory not found: ' + indirs[i])
-            
-    #check for outdir path issues
-    if outdir == None:
-        return
     
-    if mode == 'bag':
-        target_parent = os.path.dirname(outdir)
-        target = outdir
-    if mode == 'unbag':
-        target_parent = outdir
-        target = os.path.join(outdir, os.path.basename(indirs[0]))
-    
-    if not os.path.isdir(target_parent):
-        raise FileNotFoundError('Directory not found: ' + target_parent)
-    if os.path.isdir(target):
-        raise FileExistsError('File or directory exists: ' + target)
 
+# if paths not found or already exist when they shouldn't
+def _find_path_err(path, should_exist, parser, file_ok=False):
 
-#misc option errors
-def validate_opts(alg, inplace, indir):
+    if should_exist:
+        if file_ok:
+            if not os.path.exists(path): parser.error('Path not found: ' + str(path))
+        else:
+            if not os.path.isdir(path): parser.error('Path not found: ' + str(path))
+    else:
+        if os.path.exists(path): parser.error('Path already exists: ' + str(path))
 
-    #make sure chosen alg is legit
-    if alg != 'sha256' and alg != 'md5':
-        raise OptError('invalid checksum algorithm')
-
-    #make sure not bagging/unbagging in place the dir this program is in
-    if inplace:
-        this_file_path = os.path.realpath(__file__)
-        this_file_name = os.path.basename(this_file_path)
-        if os.path.isfile(os.path.join(indir, this_file_name)):
-            raise OptError('Cannot bag/unbag in-place directory containing ' + this_file_name)
-    
 
 
 '''*** output functions ***'''
 
-#duration of process to display
-def get_duration_text(dur):
+# duration of process to display
+def _get_duration_text(dur):
 
     #set time to proper units
     if dur >= 120 and dur < 7200: #minutes (2 to 119)
@@ -1055,21 +1011,21 @@ def get_duration_text(dur):
         dur = int(round(dur))
         units = 'seconds'
         
-    text = 'completed in ' + str(dur) + ' ' + units
+    text = 'completed ' + time.strftime(TIME_FMT_LOG, time.localtime()) + ' (' + str(dur) + ' ' + units + ')'
     return text
 
 
-#text at end of operation
-def get_end_text(mode, inplace, indir, outdir, fast):
+# text at end of operation
+def _get_end_text(mode, inplace, indir, outdir, fast):
     
     if mode == 'bag':
         if inplace:
-            text = 'bag saved inplace at ' + indir
+            text = 'bag saved in-place at ' + indir
         else:
             text = 'bag saved to ' + outdir
     if mode == 'unbag':
         if inplace:
-            text = 'files unbagged in place at ' + indir
+            text = 'files unbagged in-place at ' + indir
         else:
             text = 'files unbagged to ' + os.path.join(outdir, os.path.basename(indir))   
     if mode == 'validate':
@@ -1081,204 +1037,129 @@ def get_end_text(mode, inplace, indir, outdir, fast):
         text = 'updated bag: ' + indir
     
     return text
-    
-    
-#Even text-based programs should be pretty
-def print_logo(clean=False):
-    
-    if clean:
-        logo = '    ____                 __    ____   ____ \n'
-        logo += '   / _  \ ____  ________/ /__ / _  \ / _  \\\n'
-        logo += '  /     //__  \/ _  /  /  __//     //     /\n'
-        logo += ' /  _  \/  _  /__  /  /  /_ /  _  \/  _  \\\n'
-        logo += '/______/\____/____/__/_____/______/______/'
-
-    else:    
-        logo = '\n' + TEXT_TYPE['col1'] + '    ____                 __   '+ TEXT_TYPE['col2'] + ' ____   ____ ' + TEXT_TYPE['col1'] + '\n'
-        logo += '   / _  \ ____  ________/ /__ '+ TEXT_TYPE['col2'] + '/ _  \ / _  \\' + TEXT_TYPE['col1'] + '\n'
-        logo += '  /     //__  \/ _  /  /  __/'+ TEXT_TYPE['col2'] + '/     //     /' + TEXT_TYPE['col1'] + '\n'
-        logo += ' /  _  \/  _  /__  /  /  /_ '+ TEXT_TYPE['col2'] + '/  _  \/  _  \ ' + TEXT_TYPE['col1'] + '\n'
-        logo += '/______/\____/____/__/_____'+ TEXT_TYPE['col2'] + '/______/______/ ' + TEXT_TYPE['none']
-
-    return logo
 
 
-#adjustable shorcut for communicating progress to user    
-def get_status(msg, quiet, fin_text=None):
+# in-process errors - NOT for setup issues (input errors, json issues, etc.)
+def _throw_log_err(error):
 
-    if quiet: return
-        
-    #for devs to customize length, character used, etc.
-    char = '.' #character used for status 'bar'
-    length = 20 #max line length
-    num_chars = length - len(msg) #number of chars in 'bar'
-    bar_init = 3 * char #initial size of bar
-    bar_fin = num_chars * char #size of bar at completion
-        
-    if fin_text == None:
-        print(ERASE + '\r', end='', flush=True)
-        print(msg + bar_init, end='', flush=True)
-    elif type(fin_text) == str:
-        print(ERASE + '\r', end='', flush=True)
-        print(msg + bar_fin + fin_text)
-    else:
-        raise Exception('fin_text must be None or string')
-
-
-#errors - gotta catch'em all!
-def throw_error(error, except_type, quiet=True):
-    
-    #errors direct from bagit
+    # errors direct from bagit
     if hasattr(error, 'details'):
         new_msg = ''
         if len(error.details) > 0:        
+            new_msg += '\n'
             for d in error.details:        
                 if isinstance(d, bagit.ChecksumMismatch):
-                    new_msg += 'checksum mismatch: ' + d.path + '\n'
+                    new_msg += '    checksum mismatch: ' + d.path + '\n'
                 if isinstance(d, bagit.FileMissing):
-                    new_msg += 'file missing: ' + d.path + '\n'
+                    new_msg += '    file missing: ' + d.path + '\n'
             new_msg = new_msg.rstrip('\n')
         else:
             new_msg = error
     
-    #errors from this program
+    # errors from this program
     else:
         new_msg = error
 
-    if quiet:
-        raise except_type(new_msg)
-    else:
-        print(new_msg)
-        exit()
+    LOGGER.error(new_msg)
+    exit()
 
+
+# configure logging output style
+def _config_log(stage, quiet):
+
+    datefmt = '%Y-%m-%d %H:%M:%S'
+    log_format = '%(asctime)s - %(levelname)s - ' + stage + ' - %(message)s'
+    level = logging.ERROR if quiet else logging.INFO
+    logging.basicConfig(level=level, datefmt=datefmt, format=log_format, force=True)
 
 
 '''*** Main ***'''
 
 def Main():
     
-    #create options
-    (options, args) = setup_opts()
+    # create options/args
+    parser = _setup_opts()
+    options = parser.parse_args()   
     
-    #set output type
-    quiet = True if options.quiet else False
-    bagit_output = True if options.bagit_output else False
+    # var setup and validation 
+    mode = _get_mode(options.mode, parser)
+    indirs, outdir = _get_paths(mode, options.source, options.inplace, parser)
+    if options.inplace: _safe_inplace(parser, indirs[0])
+    if options.processes < 0: parser.error('Processes must be a positive integer.')
+    if options.json is not None and not os.path.isfile(options.json):
+        parser.error('JSON file does not exist: ' + options.json)
+    algs = ['sha256'] if options.algs == None else options.algs
 
-    #pretty logo
-    if not quiet: print(print_logo())
-    
-    #version info
-    if options.version:
-        print('\nbagitBB v' + VERSION + ' (bagit.py v' + bagit.VERSION + ')')
-        exit()
-    else:
-        print()
-    
-    #manage args, opts, and paths
-    try:
-        mode = get_mode(args)
-        parsed_args = parse_args(args, options.inplace, mode)
-        indirs, outdir = get_paths(parsed_args)
-        check_paths(indirs, outdir, mode)
-        validate_opts(options.alg, options.inplace, indirs[0])
-    
-    except OptError as e:
-        throw_error(e, OptError, quiet=quiet)
-    
-    except FileNotFoundError as e:
-        throw_error(e, FileNotFoundError, quiet=quiet)
-    
-    except FileExistsError as e:
-        throw_error(e, FileExistsError, quiet=quiet)
-    
-    except Exception as e:
-        throw_error(e, Exception)
+    _config_log('Initializing', options.quiet)
+    start = time.time() # start time
+      
+    # bagging ------------ /
+    if mode == 'bag':        
+        bag_metadata = BagMetadata(manual_fields=options.bag_info, json=options.json)
+        try:
+            bag_metadata.set_bag_metadata()
+        except json.JSONDecodeError as e:
+            if options.quiet: raise e
+            else: print('JSON ERROR: ' + str(e)); exit()
+        except FileNotFoundError as e:
+            if options.quiet: raise e
+            else: print('ERROR: ' + str(e)); exit()
 
-    #setup metadata
-    '''bag-info.txt metadata - this dict is ignored if json
-    file used. Change this metadata if you'd like,
-    but be sure to change optparse options to match.'''
-    manual_fields = {
-        'accession number': options.accession_num,
-        'department': options.department,
-        'contact name': options.contact_name,
-        'contact title': options.contact_title,
-        'contact email': options.contact_email,
-        'contact phone': options.contact_phone,
-        'contact address': options.contact_address,
-        'records schedule number': options.records_schedule_num,
-        'bag size': options.bag_size,
-        'record dates': options.record_dates,
-        'description': options.description,
-        'notes': options.notes
-    }    
-            
-    '''choose your own bag-venture!'''
+        bag = bag_files(indirs, outdir, algs=algs, inplace=options.inplace,
+                        metadata=bag_metadata.metadata, processes=options.processes,
+                        quiet=options.quiet, fast=options.fast, sub_docs=bag_metadata.doc_list)
     
-    start = time.time() #start time
-    
-    #bagging ------------ /
-    if mode == 'bag':
-         
-        bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, quiet=quiet)
-        bag_metadata.set_bag_metadata()
-
-        bag = bag_files(
-            indirs,
-            outdir,
-            options.alg,
-            inplace = options.inplace,
-            metadata = bag_metadata.metadata,
-            processes = options.processes,
-            quiet = quiet,
-            fast = options.fast,
-            bagit_output = bagit_output,
-            sub_docs = bag_metadata.doc_list
-        )
-    
-    #unbagging ---------- /
-    elif mode == 'unbag':
-        
-        #don't unbag in place accidentily
-        if options.inplace and not quiet:
-            confirm_task('WARNING: unbagging in place will remove original bag - are you sure? (y/n)', 'unbag cancelled')
-        
+    # unbagging ---------- /
+    elif mode == 'unbag':       
+        #don't unbag-in-place accidentily
+        if options.inplace and not options.quiet:
+            _confirm_task('WARNING: unbagging-in-place will remove original bag - are you sure? (y/n)', 'unbag cancelled')        
         make_unbag_file = True if options.copy_bag_files else False
-        bag = BetterBag(indirs[0], processes=options.processes, quiet=quiet, bagit_output=bagit_output)
-        bag.unbag(
-            outdir,
-            make_unbag_file = make_unbag_file,
-            archivematica = options.archivematica,
-            inplace = options.inplace,
-            copy_bag_files = options.copy_bag_files,
-            archivematica_manifest = options.no_manifest,
-            fast = options.fast
-        )
+        LOGGER.info('Opening Bag')
+        try:
+            bag = BetterBag(indirs[0], quiet=options.quiet)
+        except (bagit.BagError, bagit.BagValidationError) as e:
+            if options.quiet: raise e
+            else: print('ERROR: ' + str(e)); exit()
+        bag.unbag(outdir, archivematica=options.archivematica, inplace=options.inplace,
+                copy_bag_files=options.copy_bag_files, processes=options.processes,
+                archivematica_manifest=options.no_manifest, fast = options.fast)
         
-    #validating --------- /
+    # validating --------- /
     elif mode == 'validate':
-        bag = BetterBag(indirs[0], processes=options.processes, quiet=quiet, bagit_output=bagit_output)
-        bag.validate_bag(fast=options.fast)
+        LOGGER.info('Opening Bag')
+        try:
+            bag = BetterBag(indirs[0], quiet=options.quiet)
+        except (bagit.BagError, bagit.BagValidationError) as e:
+            _throw_log_err(e)
+        _config_log('Validating Bag', options.quiet)
+        bag.validate(fast=options.fast, processes=options.processes)
 
-    #updating ----------- /
+    # updating ----------- /
     elif mode == 'update':
-        
         #don't regenerate manifest accidentally
-        if options.update_manifest and not quiet:
-            confirm_task('WARNING: are you sure you want to overwrite current manifest? (y/n)', 'manifest regeneration cancelled')
+        if options.update_manifest and not options.quiet:
+            _confirm_task('WARNING: are you sure you want to overwrite current manifest? (y/n)', 'manifest regeneration cancelled')    
+        bag_metadata = BagMetadata(manual_fields=options.bag_info, json=options.json, manifest_update=options.update_manifest)
+        try:
+            bag_metadata.set_bag_metadata(ignore_sub_docs=True)
+        except json.JSONDecodeError as e:
+            if options.quiet: raise e
+            else: print('JSON ERROR: ' + str(e)); exit()
         
-        bag_metadata = BagMetadata(manual_fields=manual_fields, json=options.json, manifest_update=options.update_manifest, quiet=quiet)
-        bag_metadata.set_bag_metadata()
-        bag = BetterBag(indirs[0], processes=options.processes, quiet=quiet, bagit_output=bagit_output)
-        bag.update_metadata(bag_metadata.metadata, manifests=options.update_manifest, fast=options.fast)
+        LOGGER.info('Opening Bag')
+        try:
+            bag = BetterBag(indirs[0], quiet=options.quiet)
+        except (bagit.BagError, bagit.BagValidationError) as e:
+            _throw_log_err(e)
+        bag.update_metadata(bag_metadata.metadata, processes=options.processes, manifests=options.update_manifest, fast=options.fast)
     
     dur = time.time() - start #duration of process
     
-    #end of the line
-    if not quiet:
-        print()
-        print(get_duration_text(dur))
-        print(get_end_text(mode, options.inplace, indirs[0], outdir, options.fast))
+    # end of the line
+    if not options.quiet: print()
+    print(_get_duration_text(dur))
+    print(_get_end_text(mode, options.inplace, indirs[0], outdir, options.fast))
             
                 
 if __name__ == '__main__':
