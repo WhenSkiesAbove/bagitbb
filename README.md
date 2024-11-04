@@ -79,12 +79,12 @@ MODES
 ------
 
 Bag:
-	Takes two or more positional arguments: [source path] [source path...] [path to save bag]
-	ex: %(prog)s --sha512 -j /path/to/metadata.json -m bag /path/to/folder1 /path/to/folder2 /path/to/target/folder
+Takes two+ positional arguments: [source path] [source path...] [path to save bag]
+ex: bagitbb.py /path/to/folder1 /path/to/folder2 /path/to/target/folder
 
 Unbag:
-	Takes two positional arguments: [bag path] [unbag path]
-	ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
+Takes two positional arguments: [bag path] [unbag path]
+ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
 
 Validates bag using bagit-python.
 
@@ -105,8 +105,8 @@ IN-PLACE BAGGING/UNBAGGING
 METADATA
 ---------
 
-Bag metadata can be added when creating or updating a bag, either manually (using pre-set options) or using custom fields
-in a JSON file:
+Bag metadata can be added when creating or updating a bag, either manually
+(using pre-set options) or using custom fields in a JSON file:
 {
     "field 1": "data1",
     "field 2": "data2"
@@ -115,7 +115,9 @@ Blank fields in JSON file will be ignored.
 
 SUBMISSION DOCUMENTATION
 --------------------------
-To transfer submission docs, add a dictionary entry to a JSON file with key "submission documentation":
+To transfer submission docs, add a dictionary entry to a JSON file with key
+"submission documentation":
+
 "submission documentation": {
     "DROID report": "path/to/droid.csv",
 	"Accession stuff": "path/to/accession.doc"
