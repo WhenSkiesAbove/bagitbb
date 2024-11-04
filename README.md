@@ -84,23 +84,23 @@ ex: bagitbb.py /path/to/folder1 /path/to/folder2 /path/to/target/folder
 
 Unbag:
 Takes two positional arguments: [bag path] [unbag path]
-ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
+ex: bagitbb.py --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
 
 Validates bag using bagit-python.
 
 	Takes one positional argument: [bag path]
-	ex: %(prog)s --mode validate /path/to/bag
+	ex: bagitbb.py --mode validate /path/to/bag
 
 Update:
 
 	Takes one positinal argument: [bag path]
-	ex: %(prog)s -m update --regen --contact-name "Bob Bobberson" /path/to/bag
+	ex: bagitbb.py -m update --regen --contact-name "Bob Bobberson" /path/to/bag
 
 IN-PLACE BAGGING/UNBAGGING
 ---------------------------
 
-    %(prog)s -m bag -i /path/to/folder
-    %(prog)s -m unbag --in-place /path/to/bag
+   bagitbb.py -m bag -i /path/to/folder
+   bagitbb.py -m unbag --in-place /path/to/bag
 
 METADATA
 ---------
