@@ -3,9 +3,28 @@
 ***Disclaimer***: I'm new to Github and programming; please be patient with me.  
 ***Disclaimer the second***: "Better" is neither a dig at bagit-python nor implication that this is a different, somehow better bagging standard. Just a name I found amusing that also references its expanded functionality.
 
-### Version 1.0.0
+***License Info***: Am actively looking into official open licenes, but for now, I retain copyright. I grant permission for anyone to use, alter, and distribute as they see fit, so long as any use is similarly
+accessible and usable without restriction. Credit is appreciated, but not required. 
 
-Simple python program that builds on the Library of Congress' [bagit-python library](https://github.com/LibraryOfCongress/bagit-python), allowing for bagging and unbagging to target directory instead of just bagging in place. Meant to be more lightweight than gui bagging programs like Library of Congress' [Bagger](https://github.com/LibraryOfCongress/bagger) and [AVPreserve's Exactly](https://www.weareavp.com/) (if that's even available anymore).
+### Version 2.0.0
+
+Simple python program that builds on the Library of Congress' [bagit-python library](https://github.com/LibraryOfCongress/bagit-python), allowing for bagging and unbagging to a target directory instead of just bagging-in-place. Meant to be more lightweight than GUI bagging programs like Library of Congress' [Bagger](https://github.com/LibraryOfCongress/bagger) and [AVPreserve's Exactly](https://www.weareavp.com/) (if that's even available anymore).
+
+## Changelog (v2.0.0)
+Big re-design. Made BetterBag class a subclass of bagit.Bag. Having easier access to its code stripped away a lot of duplicated code. Other main changes:
+
+* Moved from using optparse to argpase
+* User output now uses logging module instead of custom output
+* Uses more bagit functionality to avoid code duplication (ex. for checksum generation, algorithms, etc.)
+* Multiprocessing no longers closes and reopens with each directory being bagged, but stays open for the whole checksum generation process
+* Changed mode select from positional argument to option
+* Made bag and unbag log classes
+* Removed custom exceptions
+* Changed from using shutil's copytree to copy2 in a loop for better logging
+* CSV versions of bag manifests created when bagging now
+* Unbagging-in-place no longer validates after moving files
+* /data folder given new name when unbagging-in-place to avoid conflicts if there are any subfolders also called "data"
+* Various other changes
 
 ## Dependencies
 
@@ -13,19 +32,24 @@ Simple python program that builds on the Library of Congress' [bagit-python libr
 Made and tested on Python version 3.10.6 (Linux) and 3.11.9 (Windows)
 
 ## Methodology
-### Bagging
-1) Generate checksum manifest for files in source directory using hashlib, stored as list of (path, checksum) tuples
-2) Copy source files to target directory using shutil
-3) Bag copies using bagit-python
-4) Compare checksum manifest generated in step 1 to bag manifest to confirm integrity of copied files
 
+### Bagging
+1) Generates checksums for original files (multiple sources can be used in one bag)
+2) Copies original files to target folder
+3) Bags copies using bagit-python
+4) Compares bag manifest to that generated in step 1
+
+Bag metadata can be added using either pre-set options or custom fields via a JSON file.
+   
 ### Unbagging
-1) Validate bag using bagit-python
-2) Extract checksums from bag manifest to a list of (path, checksum) tuples
-3) Copy bag payload in /data to target directory
-4) Geneate new checksum manifest for unbagged files in target directory using hashlib
-5) Compare checksum manifest values to confirm integrity of copied files  
-6) Copy bag metadata (bagit.txt, bag-info.txt, manifests, etc.) to newly created sub-directory in target
+1) Validates bag using bagit-python
+2) Copies files from data folder to target folder
+3) Generates checksum manifest of copied files and compares to bag manifest
+4) Copies bag metadata (info files, manfiests) to target folder (in created subfolder)
+
+Unbagging can be done using Archivematica folder structure, in which the payload is unbagged to an "/objects"
+folder and the bag metadata is unbagged to a "/metadata" folder along with the checksum manifest.
+See [Archivematica documentation](https://www.archivematica.org/en/docs/) for more details
 
 
 ## Other features
@@ -38,14 +62,9 @@ Made and tested on Python version 3.10.6 (Linux) and 3.11.9 (Windows)
 
 ***Archivematica mode*** unbags to a target directory formatted for use with Artefactual's [Archivematica](https://www.archivematica.org/en/) software. Includes /objects and /metadata subfolders with payload copied to /objects and bag metadata copied to /metadata/submissionDocumentation folder.  
 
-***Submission documentation*** (accession records, donor forms, etc.) can be transferred alongside the payload, stored with bagit.txt (ie in the parent folder of /data). Documents can be identified in the JSON metadata file using "submission documentation" as the key:
-```
-"submission documentation": {  
-    "accession form": "/path/to/accessionform.doc",  
-    "donor form": "/path/to/donorform.doc"  
-}
-```
-These files will be copied with with the rest of the bag metadata files when unbagging.
+***In-place bagging/unbagging*** bags or unbags a folder right where it is without copying to a target folder. Bagging-in-place is default bagit-python functionality.
+
+***Submission documentation*** (accession records, donor forms, etc.) can be transferred alongside the payload, stored with bagit.txt (ie in the parent folder of /data). Documents can be identified in the JSON metadata file. These files will be copied with the rest of the bag metadata files when unbagging.
 
 ## Installation
 Clone repository or download python file and access via python3 /path/to/bagitbb.py.
@@ -54,94 +73,130 @@ Clone repository or download python file and access via python3 /path/to/bagitbb
 ## Usage
 
 ```    
-bagitbb.py [options] [mode] [input dir1] [input dir2] [...] [output dir]
+bagitbb.py [options] [source path] [source path ...] [target path]
 
-MODES:
-bag  
-    Bags one or more folders or files to target folder.  
-    ex: bagitbb.py --accession-number A2020-335 bag /home/folder1 /home/file1.file /home/bags/bag1
-unbag  
-    Unbags preexisting bag and bag metadata to target folder.  
-    ex: bagitbb.py unbag /home/bags/bag1 /home/unbagged_files
-validate  
-    Validates integrity of existing bag.  
-    ex: bagitbb.py validate /home/bags/bag1
-update  
-    Updates metadata in bag-info.txt (fields with same names will be overwriten).
-    Regenerates manifests if regen option is used.  
-    ex: bagitbb.py -j /path/to/json.json update /path/to/bag1
+MODES
+------
 
-NOTE: for bash shell (not sure about others), wildcard * character can
-be used for bagging to target (NOT for anything else) only if there are
-NO loose files in the base directory.
+Bag:
+	Takes two or more positional arguments: [source path] [source path...] [path to save bag]
+	ex: %(prog)s --sha512 -j /path/to/metadata.json -m bag /path/to/folder1 /path/to/folder2 /path/to/target/folder
 
-Options:
+Unbag:
+	Takes two positional arguments: [bag path] [unbag path]
+	ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
+
+Validates bag using bagit-python.
+
+	Takes one positional argument: [bag path]
+	ex: %(prog)s --mode validate /path/to/bag
+
+Update:
+
+	Takes one positinal argument: [bag path]
+	ex: %(prog)s -m update --regen --contact-name "Bob Bobberson" /path/to/bag
+
+IN-PLACE BAGGING/UNBAGGING
+---------------------------
+
+    %(prog)s -m bag -i /path/to/folder
+    %(prog)s -m unbag --in-place /path/to/bag
+
+METADATA
+---------
+
+Bag metadata can be added when creating or updating a bag, either manually (using pre-set options) or using custom fields
+in a JSON file:
+{
+    "field 1": "data1",
+    "field 2": "data2"
+}
+Blank fields in JSON file will be ignored.
+
+SUBMISSION DOCUMENTATION
+--------------------------
+To transfer submission docs, add a dictionary entry to a JSON file with key "submission documentation":
+"submission documentation": {
+    "DROID report": "path/to/droid.csv",
+	"Accession stuff": "path/to/accession.doc"
+}
+This can be added to the same JSON file used to add metadata.
+
+OPTIONS AND ARGUMENTS
+-------------------------
+positional arguments:
+
+  source                Directories or files your records are being bagged from (bagging) or the top directory of the bag
+			(unbagging, validating, updating). Can have multiple sources when bagging.
+
+  target                Directory where files are bagged or unbagged to. Unused if validating, updating,
+			or bagging/unbagging-in-place.
+
+
+options:
 
   -h, --help            show this help message and exit
 
-  -a ALG, --algorithm=ALG
-                        Algorithm used to generate checksums both for copied  
-                        files and for bag. Choose either sha256 (default) or  
-                        md5.
+  -m MODE, --mode MODE  Action being performed. Choose "bag" to make a bag (default), "unbag" to unbag an existing bag,
+			"validate" to validate an existing bag, or "update" to update the metadata or manifest of an existing bag.
 
-  -i, --inplace         Bags or unbags files in place (ie does not copy files  
-                        to target). Bag in place is default bagit.py  
-                        functionality.
+  -i, --in-place        Bags or unbags files in-place (ie does not copy files to target). Bag-in-place is default
+			bagit-python functionality.
 
-  -A, --archivematica   Unbags in target directory structured for use with  
-                        Artefactual Systems' Archivematica software. Made with  
-                        Archivematica v1.14.1 in mind. See  
-                        https://www.archivematica.org/en/docs/ for details.
+  -a, --archivematica   Unbags in target directory structured for use with Artefactual Systems' Archivematica software.
+			Made with Archivematica v1.16.0 in mind. See https://www.archivematica.org/en/docs/ for details.
 
-  -j JSON, --json=JSON  Import bag metadata for bag-info.txt from json file  
-                        instead of using options. Metadata from options will  
-                        be ignored. ex: -j /path/to/metadata.json
+  -j JSON, --json JSON  Import bag metadata for bag-info.txt from json file instead of using options. Metadata from
+			options will be ignored. Can also be used to identify submission documentation using keyword
+			"submission documentation".
 
-  -q, --quiet           Hide progress updates. Errors will raise exceptions  
-                        instead of messages. NOTE: you will not be prompted to  
-                        confirm when unbagging in place or updating a bag  
-                        manifest.
+  -q, --quiet           Hide progress updates. NOTE: you will not be prompted to confirm when unbagging-in-place or updating
+			a bag manifest.
 
-  -v, --version         Show version (ignores other options/args).
+  -p PROCESSES, --processes PROCESSES
+                        Number of parallel processes used to create, validate, or update bag, and to generate checksums for
+			originals/copies.
 
-  -p PROCESSES, --processes=PROCESSES
+  -f, --fast            Only compare total size and number of files when validating bags and copied files (ie no checksums).
 
-                        Number of processes used to calculae checksums.  
-                        Original bagit.py option. Ex. -p 8
-  
-  -f, --fast            Only compare total size and number of files when  
-                        validating bags and copied files. Original bagit.py  
-                        option.
+  -r, --regen           Regenerate manifest when updating bag. Ignored if not using update mode.
 
   -x, --no-bag-files    Don't copy bag metadata when unbagging.
 
-  -r, --regen           Regenerate manifest when updating bag. Ignored if not  
-                        using update mode.
+  -X, --no-manifest     Don't save a checksum manifest when using Archivematica mode.
 
-  -X, --no-manifest     Don't create a checksum manifest for metadata folder.  
-                        For use when unbagging for Archivematica, otherwise  
-                        ignored.
+  --version             Show version and exit.
 
-  --bagit-output        Show output from bagit.py. Quiet mode supersedes this  
-                        option.
+Checksum Algorithms (default sha256):
 
-  metadata fields:
+  --sha3_512
+  --sha3_224
+  --shake_128
+  --blake2s
+  --shake_256
+  --sha1
+  --sha3_256
+  --sha3_384
+  --sha512
+  --blake2b
+  --md5
+  --sha224
+  --sha256
+  --sha384
 
-    Fields used to record metadata in baginfo.txt document. Only used for  
-    bagging and bagging in place and ignored if json option is used.  
-    ex: --accession-num A2010-34 --notes "notes go here"
-
-    --accession-number=ACCESSION_NUM  
-    --department=DEPARTMENT  
-    --contact-name=CONTACT_NAME  
-    --contact-title=CONTACT_TITLE  
-    --contact-email=CONTACT_EMAIL  
-    --contact-phone=CONTACT_PHONE  
-    --contact-address=CONTACT_ADDRESS  
-    --records-schedule-number=RECORDS_SCHEDULE_NUM  
-    --bag-size=BAG_SIZE  
-    --record-dates=RECORD_DATES  
-    --description=DESCRIPTION  
-    --notes=NOTES       
+Optional Bag Metadata:
+  --source-organization SOURCE_ORGANIZATION
+  --organization-address ORGANIZATION_ADDRESS
+  --contact-name CONTACT_NAME
+  --contact-phone CONTACT_PHONE
+  --contact-email CONTACT_EMAIL
+  --external-description EXTERNAL_DESCRIPTION
+  --external-identifier EXTERNAL_IDENTIFIER
+  --bag-size BAG_SIZE
+  --bag-group-identifier BAG_GROUP_IDENTIFIER
+  --bag-count BAG_COUNT
+  --internal-sender-identifier INTERNAL_SENDER_IDENTIFIER
+  --internal-sender-description INTERNAL_SENDER_DESCRIPTION
+  --bagit-profile-identifier BAGIT_PROFILE_IDENTIFIER
 
 ``` 
