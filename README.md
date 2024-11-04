@@ -5,7 +5,7 @@
 
 ### Version 2.0.0
 
-Simple python program that builds on the Library of Congress' [bagit-python library](https://github.com/LibraryOfCongress/bagit-python), allowing for bagging and unbagging to a target directory instead of just bagging in place. Meant to be more lightweight than GUI bagging programs like Library of Congress' [Bagger](https://github.com/LibraryOfCongress/bagger) and [AVPreserve's Exactly](https://www.weareavp.com/) (if that's even available anymore).
+Simple python program that builds on the Library of Congress' [bagit-python library](https://github.com/LibraryOfCongress/bagit-python), allowing for bagging and unbagging to a target directory instead of just bagging-in-place. Meant to be more lightweight than GUI bagging programs like Library of Congress' [Bagger](https://github.com/LibraryOfCongress/bagger) and [AVPreserve's Exactly](https://www.weareavp.com/) (if that's even available anymore).
 
 ## Changelog (v2.0.0)
 Big re-design. Made BetterBag class a subclass of bagit.Bag. Having easier access to its code stripped away a lot of duplicated code. Other main changes:
@@ -35,7 +35,8 @@ Made and tested on Python version 3.10.6 (Linux) and 3.11.9 (Windows)
 2) Copies original files to target folder
 3) Bags copies using bagit-python
 4) Compares bag manifest to that generated in step 1
-Bag metadata can be added using either pre-set options or custom fields via a JSON file (see metadata section)
+
+Bag metadata can be added using either pre-set options or custom fields via a JSON file.
    
 ### Unbagging
 1) Validates bag using bagit-python
@@ -69,20 +70,28 @@ Clone repository or download python file and access via python3 /path/to/bagitbb
 ## Usage
 
 ```    
+bagitbb.py [options] [source path] [source path ...] [target path]
+
 MODES
 ------
 
 Bag:
-    ex: %(prog)s --sha512 -j /path/to/metadata.json -m bag /path/to/folder1 /path/to/folder2 /path/to/target/folder
+	Takes two or more positional arguments: [source path] [source path...] [path to save bag]
+	ex: %(prog)s --sha512 -j /path/to/metadata.json -m bag /path/to/folder1 /path/to/folder2 /path/to/target/folder
 
 Unbag:
-    ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
+	Takes two positional arguments: [bag path] [unbag path]
+	ex: %(prog)s --archivematica --mode unbag /path/to/bag /path/to/unbag/folder
 
 Validates bag using bagit-python.
-    ex: %(prog)s --mode validate /path/to/bag
+
+	Takes one positional argument: [bag path]
+	ex: %(prog)s --mode validate /path/to/bag
 
 Update:
-    ex: %(prog)s -m update --regen --contact-name "Bob Bobberson" /path/to/bag
+
+	Takes one positinal argument: [bag path]
+	ex: %(prog)s -m update --regen --contact-name "Bob Bobberson" /path/to/bag
 
 IN-PLACE BAGGING/UNBAGGING
 ---------------------------
@@ -114,31 +123,36 @@ OPTIONS AND ARGUMENTS
 -------------------------
 positional arguments:
 
-  source                Directories or files your records are being bagged from (bagging) or the top directory of the bag (unbagging, validating, updating). Can have multiple sources
-                        when bagging.
+  source                Directories or files your records are being bagged from (bagging) or the top directory of the bag
+			(unbagging, validating, updating). Can have multiple sources when bagging.
 
-  target                Directory where files are bagged or unbagged to. Unused if validating, updating, or bagging/unbagging-in-place.
+  target                Directory where files are bagged or unbagged to. Unused if validating, updating,
+			or bagging/unbagging-in-place.
 
 
 options:
 
   -h, --help            show this help message and exit
 
-  -m MODE, --mode MODE  Action being performed. Choose "bag" to make a bag (default), "unbag" to unbag an existing bag, "validate" to validate an existing bag, or "update" to update
-                        the metadata or manifest of an existing bag.
+  -m MODE, --mode MODE  Action being performed. Choose "bag" to make a bag (default), "unbag" to unbag an existing bag,
+			"validate" to validate an existing bag, or "update" to update the metadata or manifest of an existing bag.
 
-  -i, --in-place        Bags or unbags files in-place (ie does not copy files to target). Bag-in-place is default bagit-python functionality.
+  -i, --in-place        Bags or unbags files in-place (ie does not copy files to target). Bag-in-place is default
+			bagit-python functionality.
 
-  -a, --archivematica   Unbags in target directory structured for use with Artefactual Systems' Archivematica software. Made with Archivematica v1.16.0 in mind. See
-                        https://www.archivematica.org/en/docs/ for details.
+  -a, --archivematica   Unbags in target directory structured for use with Artefactual Systems' Archivematica software.
+			Made with Archivematica v1.16.0 in mind. See https://www.archivematica.org/en/docs/ for details.
 
-  -j JSON, --json JSON  Import bag metadata for bag-info.txt from json file instead of using options. Metadata from options will be ignored. Can also be used to identify submission
-                        documentation using keyword "submission documentation".
+  -j JSON, --json JSON  Import bag metadata for bag-info.txt from json file instead of using options. Metadata from
+			options will be ignored. Can also be used to identify submission documentation using keyword
+			"submission documentation".
 
-  -q, --quiet           Hide progress updates. NOTE: you will not be prompted to confirm when unbagging-in-place or updating a bag manifest.
+  -q, --quiet           Hide progress updates. NOTE: you will not be prompted to confirm when unbagging-in-place or updating
+			a bag manifest.
 
   -p PROCESSES, --processes PROCESSES
-                        Number of parallel processes used to create, validate, or update bag, and to generate checksums for originals/copies.
+                        Number of parallel processes used to create, validate, or update bag, and to generate checksums for
+			originals/copies.
 
   -f, --fast            Only compare total size and number of files when validating bags and copied files (ie no checksums).
 
